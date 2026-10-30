@@ -1,0 +1,17 @@
+{
+  "_note": "Seed plans for AxionHost Panel (from owner's list). bolts = price per 30 days. invites = alternative cost (1 invite = 200 BOLTs). Editable later from the admin panel.",
+  "bolts_per_invite": 200,
+  "plans": [
+    {"key":"nano",   "name":"VPS Nano",   "bolts":1000, "invites":5,  "cpu":3,  "ram":13, "disk":100, "type":"container"},
+    {"key":"micro",  "name":"VPS Micro",  "bolts":1600, "invites":8,  "cpu":4,  "ram":21, "disk":160, "type":"container"},
+    {"key":"mini",   "name":"VPS Mini",   "bolts":2000, "invites":10, "cpu":6,  "ram":25, "disk":200, "type":"container"},
+    {"key":"small",  "name":"VPS Small",  "bolts":2400, "invites":12, "cpu":6,  "ram":30, "disk":240, "type":"container"},
+    {"key":"medium", "name":"VPS Medium", "bolts":3000, "invites":15, "cpu":8,  "ram":32, "disk":300, "type":"container"},
+    {"key":"large",  "name":"VPS Large",  "bolts":3200, "invites":16, "cpu":8,  "ram":40, "disk":320, "type":"container"},
+    {"key":"xl",     "name":"VPS XL",     "bolts":4000, "invites":20, "cpu":10, "ram":50, "disk":400, "type":"container"},
+    {"key":"xxl",    "name":"VPS XXL",    "bolts":5000, "invites":25, "cpu":10, "ram":64, "disk":500, "type":"container"},
+    {"key":"kvm-ent","name":"KVM Enterprise","bolts":5000,"invites":25,"cpu":10,"ram":64, "disk":500, "type":"vm", "blurb":"Dedicated quad-core performance for resource intensive workloads."},
+    {"key":"jumbo",  "name":"VPS Jumbo",  "bolts":6000, "invites":30, "cpu":12, "ram":80, "disk":650, "type":"container"},
+    {"key":"enterprise","name":"VPS Enterprise","bolts":8000,"invites":40,"cpu":16,"ram":96,"disk":800,"type":"container","blurb":"Optimized cloud instance for high concurrency workloads."}
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "base_url": "https://panel.yourdomain.com",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "cookie_secure": true,
+  "db_path": "/opt/axionhost-panel/panel.db",
+
+  "discord_client_id": "",
+  "discord_client_secret": "",
+  "discord_bot_token": "",
+  "discord_guild_id": "",
+  "owner_discord_id": "",
+
+  "google_client_id": "",
+  "google_client_secret": "",
+
+  "ssh_port_start": 20000,
+  "ssh_port_end": 29999,
+  "lxc_storage_pool": "default"
+}
