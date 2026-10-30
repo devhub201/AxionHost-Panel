@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block title %}Billing &amp; BOLTs · {{ site.site_name }}{% endblock %}{% block page %}billing{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Billing &amp; BOLTs</h1><p class="sub">Your balance, renewals and full transaction history.</p></div><a class="btn w" href="/earn">Earn BOLTs</a></div>
+<div class="grid g3 keep" style="margin-bottom:20px">
+  <div class="card stat"><div class="l">Balance</div><b>{{ user.bolts }}</b><div class="s">BOLTs</div></div>
+  <div class="card stat"><div class="l">Earned all-time</div><b>{{ user.lifetime_earned }}</b><div class="s">BOLTs</div></div>
+  <div class="card stat"><div class="l">Monthly cost</div><b id="mc">–</b><div class="s">across all servers</div></div>
+</div>
+<div class="card" style="margin-bottom:20px"><h3>Upcoming renewals</h3><div class="d">Servers renew automatically if you have enough BOLTs.</div><div id="ren" class="grid"></div></div>
+<h3 style="margin:0 0 12px">Transactions</h3><div class="tw"><table><thead><tr><th>Date</th><th>Description</th><th>Amount</th><th>Balance</th></tr></thead><tbody id="led"></tbody></table></div>
+<div class="row" style="justify-content:center;margin-top:14px"><button class="btn sm" id="more">Load more</button></div>
+{% endblock %}

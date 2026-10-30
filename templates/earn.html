@@ -1,0 +1,14 @@
+{% extends "base.html" %}{% block title %}Earn BOLTs · {{ site.site_name }}{% endblock %}{% block page %}earn{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Earn BOLTs</h1><p class="sub">Free ways to fund your servers.</p></div></div>
+<div class="grid g2" style="margin-bottom:16px">
+  <div class="card"><h3>Daily reward</h3><div class="d">Claim every 24 hours.</div><div class="row sp"><b style="font-size:30px;letter-spacing:-.03em">+{{ site.daily_bolts }}</b><button class="btn w" id="daily">Claim now</button></div><div class="msg" id="dmsg"></div></div>
+  <div class="card"><h3>Invite friends</h3><div class="d">Each friend who joins our Discord and stays {{ site.invite_min_age_days }} days pays <b>{{ site.bolts_per_invite }} BOLTs</b>. Link Discord first, then use <code>/invites</code> in the server.</div>
+    <div class="row">{% if site.discord_invite %}<a class="btn" href="{{ site.discord_invite }}" target="_blank" rel="noopener">Join our Discord</a>{% endif %}<span class="pill">Server boosters get +{{ site.booster_bonus }}</span></div></div>
+</div>
+<div class="grid g2">
+  <div class="card"><h3>Quests</h3><div class="d">One-time tasks, instant BOLTs.</div><div id="quests" class="grid"><div class="sk"></div></div></div>
+  <div class="card"><h3>Redeem promo code</h3><div class="d">Have a code? Discord must be linked.</div>
+    <form id="promo" class="row"><input class="i grow" id="code" placeholder="ENTER-CODE" maxlength="40" autocapitalize="characters"><button class="btn w" type="submit">Redeem</button></form><div class="msg" id="pmsg"></div></div>
+</div>
+{% endblock %}

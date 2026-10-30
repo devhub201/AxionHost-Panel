@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block title %}Dashboard · {{ site.site_name }}{% endblock %}{% block page %}dashboard{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Active Services</h1><p class="sub">Welcome back, {{ user.username }}</p></div><a class="btn w" href="/deploy">+ Deploy server</a></div>
+<div class="grid g3 keep" style="margin-bottom:20px">
+  <div class="card stat"><div class="l">BOLTs</div><b id="s-bolts">{{ user.bolts }}</b><div class="s">Available balance</div></div>
+  <div class="card stat"><div class="l">Servers</div><b id="s-srv">–</b><div class="s" id="s-run">&nbsp;</div></div>
+  <div class="card stat" style="grid-column:span 1"><div class="l">Daily reward</div><b style="font-size:18px;margin:12px 0 8px"><button class="btn sm w" id="daily">Claim +{{ site.daily_bolts }}</button></b><div class="s" id="dmsg">Every 24 hours</div></div>
+</div>
+<div id="list" class="grid"><div class="sk"></div><div class="sk"></div></div>
+{% endblock %}

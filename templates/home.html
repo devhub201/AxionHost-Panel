@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{ site.site_name }} — Premium VPS hosting, paid in BOLTs</title>
+<meta name="description" content="Deploy powerful VPS servers in under a minute. Earn BOLTs free with daily rewards, quests and invites.">
+<meta name="csrf" content="{{ csrf }}"><meta name="theme-color" content="#000"><link rel="icon" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/panel.css"><link rel="stylesheet" href="/static/home.css"></head>
+<body data-page="home">
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<linearGradient id="lg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#9a9aa2"/></linearGradient>
+<linearGradient id="lg2" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6b6b72"/><stop offset=".35" stop-color="#fff"/><stop offset="1" stop-color="#d8d8de"/></linearGradient>
+<linearGradient id="lg3" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a3a40"/><stop offset="1" stop-color="#b9b9c0"/></linearGradient>
+<symbol id="A" viewBox="0 0 100 100"><polygon points="47,8 58,8 36,92 15,92" fill="url(#lg1)"/><polygon points="47,8 58,8 87,92 66,92" fill="url(#lg1)" opacity=".92"/><polygon points="40,58 98,50 98,66 33,76" fill="url(#lg2)"/><polygon points="40,58 33,76 22,66" fill="url(#lg3)"/></symbol>
+<symbol id="dc" viewBox="0 0 24 24"><path d="M20.3 4.4A19.8 19.8 0 0 0 15.4 3l-.3.5a14 14 0 0 0-4.2 0L10.6 3a19.8 19.8 0 0 0-4.9 1.4C2.5 9 1.7 13.5 2.1 18a20 20 0 0 0 6 3l.8-1.3-1.3-.6.3-.3a14.2 14.2 0 0 0 12.2 0l.3.3-1.3.6.8 1.3a20 20 0 0 0 6-3c.5-5.2-.8-9.7-3.6-13.6ZM8.7 15.3c-1.1 0-2-1-2-2.2s.9-2.2 2-2.2 2 1 2 2.2-.9 2.2-2 2.2Zm6.6 0c-1.1 0-2-1-2-2.2s.9-2.2 2-2.2 2 1 2 2.2-.9 2.2-2 2.2Z"/></symbol>
+</defs></svg>
+{% if site.announcement %}<div class="banner">{{ site.announcement }}</div>{% endif %}
+<nav class="hn"><div class="wrap">
+  <a class="brand" href="/"><svg><use href="#A"/></svg><span>{{ site.site_name }}</span></a>
+  <div class="links"><a href="#plans">Plans</a><a href="#how">How it works</a><a href="#earn">Earn BOLTs</a><a href="#faq">FAQ</a></div>
+  {% if user %}<a class="btn w sm" href="/dashboard">Dashboard</a>{% else %}<a class="btn sm" href="/login">Sign in</a>{% endif %}
+</div></nav>
+<header class="hero"><div class="bg1"></div><div class="grid2"></div><div class="orbit"></div><div class="orbit o2"></div><div class="orbit o3"></div>
+<div class="wrap hc">
+  <span class="eyebrow"><i></i>Now deploying in under 60 seconds</span>
+  <h1 class="big">Premium VPS.<br><em>Paid in BOLTs.</em></h1>
+  <p class="hsub">Spin up powerful servers with full root, instant SSH and Docker support. Earn BOLTs free with daily rewards, quests and invites — no card needed.</p>
+  <div class="hcta">
+    <a class="btn dcb lg" style="background:#fff;color:#000" href="{{ '/dashboard' if user else '/login' }}"><svg><use href="#dc"/></svg>{{ 'Open dashboard' if user else 'Get started with Discord' }}</a>
+    <a class="btn lg" href="#plans">View plans</a>
+  </div>
+  <div class="ui"><div class="dots"><i></i><i></i><i></i></div><div class="uig">
+    <div class="uc"><div class="l">Active service</div><b>VPS Medium</b><span class="pill running"><i></i>running</span><div class="bar"><i style="width:34%"></i></div><div class="s">8 vCPU • 32 GB RAM • 300 GB disk</div></div>
+    <div class="uc"><div class="l">Balance</div><b>3,000</b><div class="s">BOLTs available</div></div>
+    <div class="uc"><div class="l">Uptime</div><b>99.9%</b><div class="s">last 30 days</div></div>
+  </div></div>
+</div></header>
+<div class="marq"><div class="wrap"><div class="in"><span>Full root</span><span>Instant SSH</span><span>Docker ready</span><span>Mining guard</span><span>Free to start</span></div></div></div>
+
+<section id="plans"><div class="wrap">
+  <div class="kick">Plans</div><h2>Pick your power. <em>Pay in BOLTs.</em></h2>
+  <p class="lead">Every plan is billed every 30 days. Short on BOLTs? Invite friends — each invite is worth {{ site.bolts_per_invite }}.</p>
+  <div class="hplans">
+  {% for p in plans %}<div class="card hp{{ ' hot' if loop.index == 4 }}">{% if loop.index == 4 %}<span class="tag">Most popular</span>{% endif %}
+    <h3>{{ p.name }}</h3><div class="for">{{ p.blurb or ('KVM virtual machine' if p.type == 'vm' else 'Container VPS') }}</div>
+    <div class="pr"><b>{{ '{:,}'.format(p.bolts) }}</b><span>BOLTs / month</span></div>
+    {% if p.invites %}<div class="alt">or {{ p.invites }} invites</div>{% endif %}
+    <ul><li>{{ p.cpu }} vCPU cores</li><li>{{ p.ram }} GB RAM</li><li>{{ p.disk }} GB storage</li><li>Full root &amp; SSH</li></ul>
+    <a class="btn {{ 'w' if loop.index == 4 }} block" href="/deploy">Deploy {{ p.name }}</a></div>{% endfor %}
+  </div>
+</div></section>
+
+<section id="how" style="border-top:1px solid var(--line)"><div class="wrap">
+  <div class="kick">How it works</div><h2>Live in <em>three steps</em></h2><p class="lead">No cards, no waiting for approval.</p>
+  <div class="steps3">
+    <div class="card st"><div class="n">1</div><h3>Sign in with Discord</h3><p>One click — your account and Discord link together so rewards arrive automatically.</p></div>
+    <div class="card st"><div class="n">2</div><h3>Earn or add BOLTs</h3><p>Daily rewards, quests, invites, boosts and promo codes all pay out in BOLTs.</p></div>
+    <div class="card st"><div class="n">3</div><h3>Deploy &amp; connect</h3><p>Choose plan, OS and location. Your server boots in about a minute with SSH ready.</p></div>
+  </div>
+</div></section>
+
+<section id="earn" style="border-top:1px solid var(--line)"><div class="wrap">
+  <div class="kick">Earn BOLTs</div><h2>Free hosting, <em>earned</em></h2><p class="lead">Stay active in the community and your servers pay for themselves.</p>
+  <div class="earn">
+    <div class="card bigc"><div class="num">{{ site.bolts_per_invite }}</div><h3>BOLTs per invite</h3><p>Invite friends to our Discord. Every friend who stays pays out automatically — five invites already buys a Nano server.</p></div>
+    <div>
+      <div class="card mini"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="17" rx="3"/><path d="M8 2v4M16 2v4M3 10h18"/></svg></div><div><b>Daily reward</b><span>Claim once every 24 hours</span></div><div class="amt">+{{ site.daily_bolts }}</div></div>
+      <div class="card mini"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg></div><div><b>Quests</b><span>Simple tasks, instant BOLTs</span></div><div class="amt">+100</div></div>
+      <div class="card mini"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.4 8 8 9 4.600-1 8-4 8-9V6z"/></svg></div><div><b>Server boosters</b><span>Boost the Discord, get a bonus</span></div><div class="amt">+{{ site.booster_bonus }}</div></div>
+    </div>
+  </div>
+</div></section>
+
+<section style="border-top:1px solid var(--line)"><div class="wrap">
+  <div class="kick">Features</div><h2>Built for <em>builders</em></h2><p class="lead">Everything you need, nothing you don't.</p>
+  <div class="fg">
+    <div class="card f"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg></div><h4>Instant deployment</h4><p>Automated provisioning gets your VPS online in about a minute.</p></div>
+    <div class="card f"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><path d="M12 2 4 6v6c0 5 3.400 8 8 9 4.600-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div><h4>Mining Guard</h4><p>Abuse is detected automatically so your neighbours never slow you down.</p></div>
+    <div class="card f"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><path d="m4 17 6-6-6-6M12 19h8"/></svg></div><h4>Full root &amp; SSH</h4><p>Root access with a dedicated SSH port. Docker-ready containers.</p></div>
+    <div class="card f"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></div><h4>Multiple locations</h4><p>Pick your datacenter node when you deploy.</p></div>
+    <div class="card f"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><h4>Secure by design</h4><p>Encrypted credentials, CSRF-protected sessions and a full audit log.</p></div>
+    <div class="card f"><div class="ic"><svg class="ic2" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.800 7L4 20l1.200-4.700A8 8 0 1 1 21 12z"/></svg></div><h4>Manage from Discord</h4><p>Deploy, restart and renew with slash commands — right inside our server.</p></div>
+  </div>
+</div></section>
+
+<section id="faq" style="border-top:1px solid var(--line)"><div class="wrap">
+  <div class="kick">FAQ</div><h2>Questions? <em>Answered.</em></h2><p class="lead">&nbsp;</p>
+  <div class="faq">
+    <details class="card q"><summary>What are BOLTs?</summary><p>BOLTs are the credits used to pay for servers. Earn them from daily rewards, quests, invites, boosts and promo codes.</p></details>
+    <details class="card q"><summary>What happens when my server expires?</summary><p>It's suspended and you can renew any time. If it stays expired for {{ site.delete_after_days }} days it is deleted. Servers auto-renew when you have enough BOLTs.</p></details>
+    <details class="card q"><summary>Is crypto-mining allowed?</summary><p>No. Miners are detected automatically and the server is suspended.</p></details>
+    <details class="card q"><summary>Can I run Docker?</summary><p>Yes — container servers are configured Docker-ready.</p></details>
+  </div>
+</div></section>
+
+<div class="final"><div class="wrap"><h2>Ready to <em style="color:#fff">deploy?</em></h2><p class="lead" style="margin-bottom:30px">Your first server is one click away.</p><a class="btn w lg" href="{{ '/dashboard' if user else '/login' }}">{{ 'Open dashboard' if user else 'Get started free' }}</a></div></div>
+<footer><div class="wrap"><span class="brand" style="font-size:14px"><svg style="width:20px;height:20px"><use href="#A"/></svg>{{ site.site_name }}</span><span>© {{ site.site_name }} • Panel v{{ version }}</span></div></footer>
+</body></html>

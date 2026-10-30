@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}Admin · {{ site.site_name }}{% endblock %}{% block page %}admin{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Admin</h1><p class="sub">Signed in as <b>{{ user.role }}</b>{% if user.role == 'support' %} — read-only access{% endif %}</p></div></div>
+<div class="adm" id="adm" data-role="{{ user.role }}" data-me="{{ user.id }}">
+  <div class="side" id="side"></div>
+  <div id="pane"><div class="sk"></div></div>
+</div>
+{% endblock %}
+{% block scripts %}<script src="/static/admin.js"></script>{% endblock %}

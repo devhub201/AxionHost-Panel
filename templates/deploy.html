@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Deploy · {{ site.site_name }}{% endblock %}{% block page %}deploy{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Deploy a server</h1><p class="sub">Pay with BOLTs — your server is live in about a minute.</p></div><div class="pill"><i style="background:#fff"></i><span id="have">{{ user.bolts }}</span> BOLTs available</div></div>
+<div class="steps" id="steps"><div class="on"><b>1</b>Plan</div><div><b>2</b>OS &amp; Location</div><div><b>3</b>Credentials</div><div><b>4</b>Review &amp; Launch</div></div>
+<div id="w"><div class="sk"></div></div>
+{% endblock %}

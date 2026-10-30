@@ -1,0 +1,19 @@
+{% extends "base.html" %}{% block title %}Account Settings · {{ site.site_name }}{% endblock %}{% block page %}settings{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Account Settings</h1><p class="sub">Manage your profile, security and sign-in methods.</p></div><button class="btn red" id="out">Sign out</button></div>
+<div class="msg ok" id="top">{{ request.args.get('msg','') }}</div>
+<div class="grid g2">
+ <div class="card"><h3>Profile</h3><div class="d">How you appear in the panel.</div>
+  <label class="f" for="un">Username</label><div class="row"><input class="i grow" id="un" value="{{ user.username }}" maxlength="32"><button class="btn w" id="sun">Save</button></div><div class="msg" id="m1"></div>
+  <dl class="kv" style="margin-top:6px"><dt>Account ID</dt><dd>#{{ user.id }}</dd><dt>Role</dt><dd>{{ user.role }}</dd></dl></div>
+ <div class="card"><h3>Linked sign-in methods</h3><div class="d">Link more than one so you never get locked out.</div><div id="links" class="grid" data-d="{{ 1 if providers.discord else 0 }}" data-g="{{ 1 if providers.google else 0 }}"></div><div class="msg" id="m2"></div></div>
+ <div class="card"><h3>Email &amp; password</h3><div class="d">{% if user.has_password %}Change your password.{% else %}Add email login to your account.{% endif %}</div>
+  <form id="cred"><label class="f" for="e">Email</label><input class="i" id="e" type="email" value="{{ user.email or '' }}" autocomplete="email" required>
+  {% if user.has_password %}<label class="f" for="cp">Current password</label><input class="i" id="cp" type="password" autocomplete="current-password" required>{% endif %}
+  <label class="f" for="np">New password</label><input class="i" id="np" type="password" autocomplete="new-password" required minlength="{{ site.min_password }}">
+  <div class="msg" id="m3"></div><button class="btn w" type="submit">Save credentials</button></form></div>
+ <div class="card"><h3>Redeem Promo Code</h3><div class="d">Enter a code to receive BOLTs. Discord must be linked.</div>
+  <form id="promo" class="row"><input class="i grow" id="code" placeholder="ENTER-CODE" maxlength="40" autocapitalize="characters"><button class="btn w" type="submit">Redeem</button></form><div class="msg" id="pmsg"></div></div>
+ <div class="card" style="grid-column:1/-1"><div class="row sp"><div><h3>Active sessions</h3><div class="d" style="margin:0">Devices signed in to your account.</div></div><button class="btn sm red" id="rev">Sign out other devices</button></div><div id="sess" class="grid" style="margin-top:14px"></div></div>
+</div>
+{% endblock %}

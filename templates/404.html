@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block title %}Page not found · {{ site.site_name }}{% endblock %}{% block page %}404{% endblock %}
+{% block body %}<div class="err404"><div class="glow"></div><div style="position:relative">
+<svg class="logo"><use href="#A"/></svg>
+<div class="big">404</div>
+<h1>This page drifted off the grid</h1>
+<p>The page you're looking for doesn't exist, was moved, or you don't have access to it.</p>
+<div class="row" style="justify-content:center"><a class="btn w lg" href="{{ '/dashboard' if user else '/' }}">{{ 'Back to dashboard' if user else 'Go home' }}</a><a class="btn lg" href="/" id="back">Go back</a></div>
+</div></div>{% endblock %}
