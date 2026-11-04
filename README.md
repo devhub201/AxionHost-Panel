@@ -53,7 +53,7 @@ The panel is **not** exposed directly. The web service listens on **`127.0.0.1:8
 - `80, 443/tcp` → only in Caddy mode.
 - Nothing else. Discord bot & worker only make *outgoing* connections.
 
-**Cloudflare Tunnel setup** (the installer does the server side): Zero Trust → Networks → Tunnels → *Create tunnel* → Cloudflared → copy the token → paste in the installer. Then in the tunnel add **Public Hostname**: `panel.yourdomain.com` → `HTTP` → `localhost:8080`.
+**Cloudflare Tunnel setup** (the installer does the server side): Zero Trust → Networks → Tunnels → *Create tunnel* → Cloudflared → copy the token → paste in the installer. Then in the tunnel add **Public Hostname**: `panel.yourdomain.com` → `HTTP` → `127.0.0.1:8080`.
 
 **IPv6-only node:** supported. VPS SSH ports listen on `[::]` (IPv6 + IPv4). Users SSH with `ssh root@<your-ipv6-or-hostname> -p <port>` — they need IPv6 (or put a hostname with an AAAA record). GitHub has no IPv6, so on IPv6-only servers the installer offers free NAT64 DNS so `git`/`pip` work.
 **Extra nodes over IPv6:** `lxc remote add node2 https://[2001:db8::2]:8443` → Admin → Nodes → LXC remote = `node2`, listen = `[::]`.
@@ -86,3 +86,21 @@ Tested here with mocks: **98 web/worker checks + 13 bot checks pass**, pages scr
 **Backup:** copy `panel.db` and `config.panel.json` regularly.
 
 <div align="center">Made with ♥ by <b>Peter Parker</b> • AxionHost Panel v1.0.0</div>
+
+## VPS engine: Docker or LXD
+
+`"backend"` in `config.panel.json` picks how VPS are created.
+
+| | Docker (`"backend": "docker"`) | LXD (`"backend": "lxd"`) |
+|---|---|---|
+| Setup | `apt install docker.io` only | `lxd init` + storage pool |
+| Works on a VPS / nested host | yes | often not (no loop devices / nesting) |
+| Each VPS | container with SSH (root + password) | system container or VM |
+| CPU / RAM limit | yes (`--cpus`, `--memory`) | yes |
+| Disk limit | only if the Docker storage driver supports quotas (xfs+pquota, btrfs, zfs); otherwise VPS still run and usage is shown, not capped | yes on btrfs/zfs/lvm |
+| VM plans | hidden | yes |
+| Remote nodes | no (local only) | yes |
+
+Switch engine on an installed panel: `sudo ./install-panel.sh engine docker` (or `lxd`).
+VPS made with the old engine are not moved; delete and redeploy them.
+Disk usage per VPS (Docker) is the container's own writable layer, the host disk is never shown.
