@@ -270,7 +270,7 @@ def create_app(cfg=None, http=None):
         return start_session(uid, r)
 
     # ---------------- account ----------------
-    @app.get("/api/me")
+     @app.get("/api/me")
     @api()
     def me():
         u = current(); s = S()
@@ -352,6 +352,7 @@ def create_app(cfg=None, http=None):
         plans = []
         for p in db.execute("SELECT * FROM plans WHERE enabled=1 ORDER BY sort,bolts"):
             d = dict(p)
+            if d["type"] == "vm" and str(cfg.get("backend", "lxd")).lower() == "docker": continue
             if d["stock"] >= 0:
                 used = db.execute("SELECT COUNT(*) FROM servers WHERE plan_key=? AND deleted=0", (p["key"],)).fetchone()[0]
                 d["left"] = max(0, d["stock"] - used)
@@ -608,3 +609,4 @@ def get_app():
 if __name__ == "__main__":
     c = core.load_config(); a = create_app(c)
     a.run(host=c["host"], port=c["port"])
+          
