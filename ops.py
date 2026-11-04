@@ -63,6 +63,7 @@ def deploy(db, cfg, user, plan_key, node_id, image_key, name, ip=""):
         node = db.execute("SELECT * FROM nodes WHERE id=? AND enabled=1", (node_id,)).fetchone()
         img = db.execute("SELECT * FROM images WHERE key=? AND enabled=1", (image_key,)).fetchone()
         if not (plan and node and img): raise OpError("Pick a valid plan, location and OS")
+        if plan["type"] == "vm" and str(cfg.get("backend", "lxd")).lower() == "docker": raise OpError("This plan is not available on this node")
         lim = geti(s, "max_servers_per_user")
         if db.execute("SELECT COUNT(*) FROM servers WHERE user_id=? AND deleted=0", (u["id"],)).fetchone()[0] >= lim: raise OpError("Server limit reached (%d)" % lim)
         if db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (node["id"],)).fetchone()[0] >= node["max_servers"]: raise OpError("That location is full. Pick another.")
@@ -148,3 +149,4 @@ def notify(db, user_id, title, body, kind="info"):
     """Queue a Discord DM/log message for the bot to deliver."""
     u = db.execute("SELECT discord_id FROM users WHERE id=?", (user_id,)).fetchone()
     db.execute("INSERT INTO notify(user_id,discord_id,title,body,kind,created) VALUES(?,?,?,?,?,?)", (user_id, u["discord_id"] if u else None, title, body, kind, now()))
+        
