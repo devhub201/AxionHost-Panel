@@ -3,7 +3,7 @@
 # ║  AxionHost Panel — installer            Made by Peter Parker         ║
 # ║  Works on IPv4, dual-stack AND IPv6-only servers (Cloudflare Tunnel) ║
 # ╚══════════════════════════════════════════════════════════════════════╝
-# Usage:  sudo ./install-panel.sh [install|update|status|logs|restart|doctor|cloudflare|show|uninstall]
+# Usage:  sudo ./install-panel.sh [install|update|status|logs|restart|doctor|cloudflare|engine docker|lxd|show|uninstall]
 set -u
 export LC_ALL=C.UTF-8 2>/dev/null || true
 BRAND="AxionHost"; SVC="axionhost"; ACC=255
@@ -93,7 +93,7 @@ setup_cloudflare() {
   systemctl list-unit-files 2>/dev/null | grep -q '^cloudflared.service' && step "Removing old tunnel service" cloudflared service uninstall
   step "Starting tunnel service" cloudflared service install "$tok" || return 1
   sleep 3; systemctl is-active --quiet cloudflared && ok "Tunnel is connected" || { bad "cloudflared not running — see: journalctl -u cloudflared -n 30"; return 1; }
-  printf '\n  %sLast step (in Cloudflare):%s tunnel → Public Hostname → Add\n    Hostname : %s%s%s\n    Service  : %sHTTP  →  localhost:%s%s\n\n' "$B" "$N" "$A" "$DOMAIN" "$N" "$A" "$PORT" "$N"
+  printf '\n  %sLast step (in Cloudflare):%s tunnel → Public Hostname → Add\n    Hostname : %s%s%s\n    Service  : %sHTTP  →  127.0.0.1:%s%s  (type HTTP, not HTTPS)\n\n' "$B" "$N" "$A" "$DOMAIN" "$N" "$A" "$PORT" "$N"
 }
 setup_caddy() {
   head_ "Caddy (automatic HTTPS)"
@@ -104,6 +104,40 @@ setup_caddy() {
   [ -f /etc/caddy/Caddyfile ] && cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.${SVC}.bak
   printf '%s {\n\treverse_proxy 127.0.0.1:%s\n}\n' "$DOMAIN" "$PORT" > /etc/caddy/Caddyfile
   step "Reloading Caddy" systemctl reload caddy || step "Restarting Caddy" systemctl restart caddy
+}
+setup_lxcfs() {   # makes free -h / neofetch / nproc inside a VPS show that VPS's RAM + CPU limits
+  command -v lxcfs >/dev/null 2>&1 || step "Installing lxcfs" apt-get install -y -qq lxcfs || { warn "lxcfs not installed — free/neofetch inside VPS will show the host (run: apt install lxcfs)"; return 0; }
+  if lxcfs --help 2>&1 | grep -q -- --enable-cfs; then
+    local bin; bin=$(command -v lxcfs); mkdir -p /etc/systemd/system/lxcfs.service.d
+    printf '[Service]\nExecStart=\nExecStart=%s --enable-cfs --enable-loadavg /var/lib/lxcfs\n' "$bin" > /etc/systemd/system/lxcfs.service.d/axp.conf
+    systemctl daemon-reload
+  fi
+  systemctl enable --now lxcfs >/dev/null 2>&1 || true; systemctl restart lxcfs >/dev/null 2>&1 || true
+  [ -e /var/lib/lxcfs/proc/meminfo ] && ok "lxcfs active: free -h / neofetch show each VPS's own RAM + CPUs" || warn "lxcfs not working here (needs FUSE) — free/neofetch inside VPS will show the host"
+}
+install_engine() {   # $1 = docker | lxd
+  case "$1" in
+  docker)
+    if ! command -v docker >/dev/null 2>&1; then step "Installing Docker" apt-get install -y -qq docker.io || return 1; fi
+    step "Starting Docker" systemctl enable --now docker || return 1
+    docker info >/dev/null 2>&1 || { bad "Docker daemon not responding — journalctl -u docker -n 30"; return 1; }
+    ok "Docker ready ($(docker --version | cut -d, -f1))"
+    setup_lxcfs
+    if docker run --rm --init --storage-opt size=2000000000 alpine:3.20 true >/dev/null 2>&1; then ok "Per-VPS disk limit: enforced"
+    elif docker run --rm --init alpine:3.20 true >/dev/null 2>&1; then warn "Per-VPS disk limit NOT enforceable on this storage driver — VPS still work, disk usage is shown per VPS, but not capped"
+    else warn "Could not pull alpine test image (internet / registry?) — check: docker run --rm alpine:3.20 true"; fi;;
+  lxd)
+    command -v lxc >/dev/null 2>&1 || { step "Installing LXD" snap install lxd || return 1; }
+    lxc storage list --format csv 2>/dev/null | grep -q . || step "Initialising LXD" lxd init --auto --storage-backend=dir || return 1
+    ok "LXD ready";;
+  *) return 1;; esac
+}
+set_backend() {  # $1 = docker | lxd  → writes config
+  "$VENV/bin/python" - "$1" <<PY
+import json,sys
+p="$CFG"; c=json.load(open(p)); c["backend"]=sys.argv[1]; json.dump(c,open(p,"w"),indent=2)
+PY
+  chmod 600 "$CFG"
 }
 open_firewall() {
   command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active" || return 0
@@ -142,6 +176,7 @@ Environment=AXION_PANEL_CONFIG=$CFG
 ExecStart=$3
 Restart=always
 RestartSec=3
+RestartPreventExitStatus=78
 $4
 [Install]
 WantedBy=multi-user.target
@@ -149,7 +184,8 @@ UNIT
 }
 install_units() {
   local port; port=$(cfgget port)
-  mk_unit ${SVC}-web "$BRAND Panel (web)" "$VENV/bin/waitress-serve --listen=127.0.0.1:$port --threads=8 --call app:get_app" $'NoNewPrivileges=true\nPrivateTmp=true'
+  local lis="127.0.0.1:$port"; ip -6 addr show lo 2>/dev/null | grep -q '::1' && lis="$lis [::1]:$port"      # cloudflared resolves "localhost" to ::1 first
+  mk_unit ${SVC}-web "$BRAND Panel (web)" "$VENV/bin/waitress-serve \"--listen=$lis\" --threads=8 --call app:get_app" $'NoNewPrivileges=true\nPrivateTmp=true'
   mk_unit ${SVC}-worker "$BRAND Panel worker" "$VENV/bin/python worker.py" ""
   mk_unit ${SVC}-panelbot "$BRAND Panel Discord bot" "$VENV/bin/python panel_bot.py" $'NoNewPrivileges=true\nPrivateTmp=true'
   systemctl daemon-reload
@@ -172,7 +208,6 @@ cmd_install() {
   [ "$HAS4" = 1 ] && ok "Public IPv4: ${IP4:-yes}" || warn "No public IPv4 (that's fine — IPv6 / tunnel mode)"
   [ "$HAS6" = 1 ] && ok "Public IPv6: ${IP6:-yes}" || info "No IPv6"
   [ "$HAS4$HAS6" = "00" ] && warn "No public IP at all — Cloudflare Tunnel mode will still work (outbound only)."
-  command -v lxc >/dev/null 2>&1 && ok "LXD found" || warn "LXD (lxc) not found — install it: snap install lxd && lxd init --auto"
   ipv6_only_fixes
   head_ "2 · Installing dependencies"
   step "Python, venv & packages" install_deps || exit 1
@@ -191,9 +226,11 @@ cmd_install() {
     printf '\n  %sThis node%s\n' "$B" "$N"
     if [ "$HAS6" = 1 ]; then LISTEN="[::]"; info "IPv6 present → VPS SSH ports listen on IPv6 + IPv4 (dual-stack)"; else LISTEN="0.0.0.0"; fi
     NODEHOST=$(ask "Address users SSH to (IP or hostname)" "${IP4:-$IP6}")
+    printf '\n  %sVPS engine%s\n    1) %sDocker%s  ← recommended: works on any VPS / server, no LXD setup\n    2) LXD     full system containers or VMs, needs LXD ready\n\n' "$B" "$N" "$A" "$N"
+    case "$(ask "Choose" 1)" in 2) ENGINE=lxd;; *) ENGINE=docker;; esac
     SSHA=$(ask "VPS SSH port range — start" 20000); SSHB=$(ask "VPS SSH port range — end" 29999)
     case "$SSHA$SSHB" in *[!0-9]*) bad "Ports must be numbers"; exit 1;; esac
-    write_config; ok "config.panel.json written (chmod 600)"; step "Preparing database" "$VENV/bin/python" -c "import core;c=core.load_config('$CFG');core.init_db(core.connect(c['db_path']))"
+    write_config; set_backend "$ENGINE"; ok "config.panel.json written (chmod 600)"; install_engine "$ENGINE" || warn "Engine not ready — fix it, then run:  ./install-panel.sh engine $ENGINE"; step "Preparing database" "$VENV/bin/python" -c "import core;c=core.load_config('$CFG');core.init_db(core.connect(c['db_path']))"
     seed_node && ok "Node 1 → $NODEHOST (listen $LISTEN)"
     case "$MODE" in tunnel) setup_cloudflare || warn "Tunnel not finished — run later:  ./install-panel.sh cloudflare";; caddy) setup_caddy || warn "Caddy failed — see $LOG";; esac
     open_firewall
@@ -209,12 +246,19 @@ cmd_update() { need_root; mkdir -p "$(dirname "$LOG")"; banner
   [ -d .git ] && step "Pulling latest code" git pull --ff-only || warn "Not a git checkout — upload new files manually"
   step "Updating packages" "$VENV/bin/pip" install -q -r requirements-panel.txt
   step "Restarting services" systemctl restart $SERVICES; }
+cmd_engine() { need_root; mkdir -p "$(dirname "$LOG")"; local e="${1:-}"; case "$e" in docker|lxd) ;; *) echo "Usage: $0 engine docker|lxd"; exit 1;; esac
+  banner; install_engine "$e" || exit 1; set_backend "$e"; step "Restarting worker" systemctl restart ${SVC}-worker
+  ok "VPS engine is now: $e   (existing VPS created with the other engine are not moved)"; }
 cmd_status() { for s in $SERVICES cloudflared caddy; do systemctl list-unit-files 2>/dev/null | grep -q "^$s.service" || continue; if systemctl is-active --quiet "$s"; then ok "$s"; else bad "$s (inactive)"; fi; done; }
 cmd_doctor() { banner; head_ "Doctor"; detect_net; [ -f "$CFG" ] && ok "config.panel.json present" || bad "config.panel.json missing"
   [ "$HAS4" = 1 ] && ok "IPv4: ${IP4}" || info "IPv4: none"; [ "$HAS6" = 1 ] && ok "IPv6: ${IP6}" || info "IPv6: none"
-  command -v lxc >/dev/null && { lxc info >/dev/null 2>&1 && ok "LXD reachable" || bad "LXD installed but not responding"; lxc storage list --format csv 2>/dev/null | head -3 | sed 's/^/      pool: /'; } || bad "lxc not found"
+  local eng; eng=$(cfgget backend); eng=${eng:-lxd}; ok "VPS engine: $eng"
+  if [ "$eng" = docker ]; then command -v docker >/dev/null && { docker info >/dev/null 2>&1 && ok "Docker reachable" || bad "Docker installed but not responding"; } || bad "docker not found — run: ./install-panel.sh engine docker"
+  else command -v lxc >/dev/null && { lxc info >/dev/null 2>&1 && ok "LXD reachable" || bad "LXD installed but not responding"; lxc storage list --format csv 2>/dev/null | head -3 | sed 's/^/      pool: /'; lxc storage list --format csv 2>/dev/null | grep -q . || bad "No LXD storage pool — run: lxd init --auto --storage-backend=dir (or switch: ./install-panel.sh engine docker)"; } || bad "lxc not found"; fi
   cmd_status; local p; p=$(cfgget port); p=${p:-8080}
-  curl -fsS --max-time 5 "http://127.0.0.1:$p/healthz" >/dev/null 2>&1 && ok "Web answers on 127.0.0.1:$p" || bad "Web not answering on 127.0.0.1:$p"
+  curl -fsS --max-time 5 "http://127.0.0.1:$p/healthz" >/dev/null 2>&1 && ok "Web answers on 127.0.0.1:$p" || bad "Web not answering on 127.0.0.1:$p  (journalctl -u ${SVC}-web -n 30)"
+  curl -fsS --max-time 5 "http://[::1]:$p/healthz" >/dev/null 2>&1 && ok "Web answers on [::1]:$p" || warn "Not on [::1]:$p — in Cloudflare use  http://127.0.0.1:$p  (not localhost)"
+  systemctl is-active --quiet ${SVC}-panelbot || { warn "Discord bot not running — last log lines:"; journalctl -u ${SVC}-panelbot -n 8 --no-pager 2>/dev/null | sed 's/^/      /'; }
   reach https://discord.com && ok "discord.com reachable" || bad "discord.com not reachable"
   local b; b=$(cfgget base_url); case "$b" in https://*) curl -fsS --max-time 10 "$b/healthz" >/dev/null 2>&1 && ok "Public URL works: $b" || warn "Public URL not answering yet: $b (DNS / tunnel hostname?)";; esac
   ls /etc/systemd/system/${SVC}-*.service >/dev/null 2>&1 || warn "services not installed"; echo; }
@@ -224,11 +268,4 @@ for k,v in d.items(): print("  "+k.ljust(24), ("*"*8 if ("secret" in k or "token
 PY
 }
 cmd_uninstall() { need_root; yesno "Stop & remove the $BRAND services? (data in $DIR is kept)" n || exit 0
-  systemctl disable --now $SERVICES 2>/dev/null; rm -f /etc/systemd/system/${SVC}-*.service; systemctl daemon-reload; ok "Services removed. Data kept: panel.db, config.panel.json"; }
-cmd_cloudflare() { need_root; mkdir -p "$(dirname "$LOG")"; PORT=$(cfgget port); PORT=${PORT:-8080}; local b; b=$(cfgget base_url); DOMAIN=${b#https://}; setup_cloudflare; }
-main() { case "${1:-install}" in
-  install) cmd_install;; update) cmd_update;; status) cmd_status;; doctor) cmd_doctor;; show) cmd_show;; uninstall) cmd_uninstall;; cloudflare) cmd_cloudflare;;
-  logs) journalctl -u ${SVC}-web -u ${SVC}-worker -u ${SVC}-panelbot -f -n 40;; restart) systemctl restart $SERVICES && ok "restarted";;
-  *) echo "Usage: $0 [install|update|status|logs|restart|doctor|cloudflare|show|uninstall]";; esac; }
-[ "${AXP_SOURCE_ONLY:-0}" = 1 ] || main "$@"
-# end of install-panel.sh
+  systemctl disable --now $SERVICES 2>/dev/null; rm -f /etc/systemd/system/${SVC}-*.service; systemctl daemon-reload; ok "Services removed. Data kept: panel.db, config.panel.jso
