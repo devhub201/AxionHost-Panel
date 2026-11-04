@@ -1,9 +1,9 @@
-"""AxionHost Panel — worker. Runs queued jobs (deploy/start/stop/...) with LXD, syncs status,
+"""AxionHost Panel — worker. Runs queued jobs (deploy/start/stop/...) with Docker or LXD (config "backend"), syncs status,
 bills servers, scans for miners. Only whitelisted, validated lxc commands are ever executed (no shell).
 Run:  python worker.py   (systemd: axionhost-worker)"""
-import json, logging, subprocess, time
+import json, logging, os, subprocess, time
 import core, ops
-from core import now, tx, add_bolts, audit, geti, dec, enc, CONT_RE, IMG_RE, REMOTE_RE
+from core import now, tx, add_bolts, audit, geti, dec, enc, CONT_RE, IMG_RE, REMOTE_RE, DOCKER_IMG_RE
 
 log = logging.getLogger("axp.worker")
 MINERS = ("xmrig", "minerd", "cpuminer", "ethminer", "nbminer", "t-rex", "trex", "phoenixminer", "lolminer", "gminer", "cgminer", "bfgminer", "nicehash", "kawpowminer", "xmr-stak", "ccminer")
@@ -22,6 +22,32 @@ if command -v systemctl >/dev/null 2>&1; then systemctl enable --now ssh 2>/dev/
 elif command -v rc-service >/dev/null 2>&1; then rc-service sshd restart || rc-service sshd start; else /usr/sbin/sshd; fi
 """
 
+# PID 1 of every Docker VPS: start sshd if installed, stay alive, exit fast on `docker stop`.
+DOCKER_ENTRY = "mkdir -p /run/sshd; [ -x /usr/sbin/sshd ] && /usr/sbin/sshd; trap 'exit 0' TERM INT; while :; do sleep 3600 & wait $!; done"
+DOCKER_STATE = {"running": "running", "exited": "stopped", "created": "stopped", "paused": "stopped", "dead": "stopped"}
+
+def docker_image(img):
+    """LXD-style image name -> Docker Hub image (ubuntu:22.04 | images:debian/12 -> debian:12 | local:x -> x)."""
+    kind, _, rest = img.partition(":")
+    if kind == "images":
+        d, _, v = rest.partition("/"); return d + (":" + v if v else "")
+    if kind == "ubuntu": return "ubuntu:" + rest
+    return rest
+
+LXCFS_DIR = "/var/lib/lxcfs"
+LXCFS_FILES = ("cpuinfo", "diskstats", "meminfo", "stat", "swaps", "uptime", "loadavg")
+
+def lxcfs_mounts(mode="auto", root=None):
+    """Bind lxcfs /proc files so free/top/neofetch/nproc inside a VPS show ITS cgroup limits (RAM, CPUs), not the host's.
+    These are the real enforced limits - nothing is faked. Skipped when lxcfs is not running."""
+    root = root or LXCFS_DIR
+    if str(mode).lower() in ("off", "no", "0", "false"): return []
+    have = [f for f in LXCFS_FILES if os.path.exists("%s/proc/%s" % (root, f))]
+    if not os.path.exists("%s/proc/meminfo" % root): return []
+    out = []
+    for f in have: out += ["-v", "%s/proc/%s:/proc/%s:rw" % (root, f, f)]
+    return out
+
 class JobError(Exception): pass
 
 def real_run(args, input=None, timeout=300):
@@ -29,13 +55,65 @@ def real_run(args, input=None, timeout=300):
         p = subprocess.run(args, input=input, capture_output=True, text=True, timeout=timeout)
         return p.returncode, (p.stdout + p.stderr).strip()
     except subprocess.TimeoutExpired: return 124, "timeout"
-    except FileNotFoundError: return 127, "lxc not found"
+    except FileNotFoundError: return 127, "%s not found (is it installed?)" % args[0]
 
 class Worker:
     def __init__(self, cfg, db=None, run=real_run, sleep=time.sleep):
         self.cfg, self.run, self.sleep = cfg, run, sleep
         self.db = db or core.connect(cfg["db_path"]); core.init_db(self.db)
         self.last = dict(sync=0, bill=0, scan=0, disk=0)
+        self.docker_mode = str(cfg.get("backend", "lxd")).lower() == "docker"
+
+    # ---- docker helpers (validated, no shell) ----
+    def cname(self, s):
+        node = self.db.execute("SELECT lxc_remote FROM nodes WHERE id=?", (s["node_id"],)).fetchone()
+        if node and (node["lxc_remote"] or ""): raise JobError("remote nodes need the LXD engine (Docker engine is local only)")
+        if not CONT_RE.match(s["container"]): raise JobError("bad container name")
+        return s["container"]
+
+    def dk(self, *args, input=None, timeout=300, check=True):
+        rc, out = self.run(["docker", *[str(a) for a in args]], input, timeout)
+        if check and rc != 0: raise JobError("docker %s failed: %s" % (args[0], out[-300:]))
+        return rc, out
+
+    def listen_addr(self, s):
+        node = self.db.execute("SELECT listen FROM nodes WHERE id=?", (s["node_id"],)).fetchone()
+        la = (node["listen"] if node else "") or "0.0.0.0"
+        return la if core.LISTEN_RE.match(la) else "0.0.0.0"
+
+    def provision_docker(self, s, image):
+        if s["type"] == "vm": raise JobError("VM plans need the LXD engine")
+        name = self.cname(s); img = docker_image(image)
+        if not DOCKER_IMG_RE.match(img): raise JobError("bad image")
+        self.dk("rm", "-f", name, check=False, timeout=120)                          # idempotent re-run
+        ram, cpu, disk = int(s["ram"]), int(s["cpu"]), int(s["disk"])
+        base = ["run", "-d", "--init", "--name", name, "--hostname", name, "--restart", "unless-stopped",
+                "--memory", "%dm" % (ram * 1024), "--memory-swap", "%dm" % (ram * 1024), "--cpus", str(cpu), "--pids-limit", "4096",
+                "-p", "%s:%d:22" % (self.listen_addr(s), int(s["ssh_port"]))]
+        base += lxcfs_mounts(self.cfg.get("docker_lxcfs", "auto"))
+        tail = ["--entrypoint", "sh", img, "-c", DOCKER_ENTRY]
+        mode = str(self.cfg.get("docker_enforce_disk", "auto")).lower()
+        quota = ["--storage-opt", "size=%d" % (disk * core.GB)]
+        try:
+            if mode in ("auto", "yes"):
+                rc, out = self.dk(*base, *quota, *tail, check=False, timeout=900)
+                if rc != 0 and mode == "auto" and ("storage-opt" in out or "quota" in out.lower()):
+                    log.warning("disk quota not supported by this Docker storage driver - %s runs without a disk limit", name)
+                    self.dk("rm", "-f", name, check=False, timeout=60)
+                    self.dk(*base, *tail, timeout=900)
+                elif rc != 0: raise JobError("docker run failed: %s" % out[-300:])
+            else: self.dk(*base, *tail, timeout=900)
+            for _ in range(30):
+                if self.dk("exec", name, "true", check=False, timeout=20)[0] == 0: break
+                self.sleep(1)
+            else: raise JobError("container did not start")
+            pw = dec(self.cfg["secret_key"], s["root_pw_enc"])
+            self.dk("exec", "-i", name, "chpasswd", input="root:%s\n" % pw)
+            self.dk("exec", "-i", name, "sh", "-c", "bash -s 2>/dev/null || sh -s", input=SSH_SETUP, timeout=420, check=False)
+            if self.dk("exec", name, "sh", "-c", "test -x /usr/sbin/sshd", check=False)[0] != 0:
+                raise JobError("sshd could not be installed in the container (no internet from the node, or unsupported image)")
+        except Exception:
+            self.dk("rm", "-f", name, check=False, timeout=120); raise
 
     # ---- lxc helpers (validated) ----
     def target(self, s):
@@ -73,6 +151,7 @@ class Worker:
         return n
 
     def provision(self, s, image):
+        if self.docker_mode: return self.provision_docker(s, image)
         t = self.target(s)
         if not IMG_RE.match(image): raise JobError("bad image")
         self.lxc("delete", t, "--force", check=False, timeout=120)                    # idempotent re-run
@@ -131,6 +210,9 @@ class Worker:
             self.db.execute("INSERT INTO notify(user_id,title,body,kind,created,to_log) VALUES(?,?,?,?,?,1)", (s["user_id"], "Deploy failed", "Server #%d: %s" % (s["id"], why[:300]), "staff", now()))
 
     def simple(self, s, verb, status):
+        if self.docker_mode:
+            self.dk(verb, *(["-t", "10"] if verb in ("stop", "restart") else []), self.cname(s), timeout=120)
+            self.db.execute("UPDATE servers SET status=? WHERE id=?", (status, s["id"])); return verb
         self.lxc(verb, self.target(s), timeout=120); self.db.execute("UPDATE servers SET status=? WHERE id=?", (status, s["id"])); return verb
 
     def job_start(self, s, p): return self.simple(s, "start", "running")
@@ -138,11 +220,22 @@ class Worker:
     def job_restart(self, s, p): return self.simple(s, "restart", "running")
 
     def job_delete(self, s, p):
-        self.lxc("delete", self.target(s), "--force", check=False, timeout=180)
+        if self.docker_mode: self.dk("rm", "-f", "-v", self.cname(s), check=False, timeout=180)
+        else: self.lxc("delete", self.target(s), "--force", check=False, timeout=180)
         self.db.execute("UPDATE servers SET deleted=1,status='deleted',ssh_port=NULL WHERE id=?", (s["id"],)); return "deleted"
 
     # ---- periodic ----
     def sync_status(self):
+        if self.docker_mode:
+            rc, out = self.dk("ps", "-a", "--format", "{{.Names}}|{{.State}}", check=False, timeout=60)
+            if rc != 0: return
+            live = {}
+            for l in out.splitlines():
+                n, _, st = l.partition("|"); live[n.strip()] = DOCKER_STATE.get(st.strip().lower(), "")
+            for s in self.db.execute("SELECT id,container,status FROM servers WHERE deleted=0 AND status IN ('running','stopped')").fetchall():
+                st = live.get(s["container"])
+                if st in ("running", "stopped") and st != s["status"]: self.db.execute("UPDATE servers SET status=? WHERE id=?", (st, s["id"]))
+            return
         for n in self.db.execute("SELECT * FROM nodes WHERE enabled=1").fetchall():
             rem = n["lxc_remote"] or ""
             if not REMOTE_RE.match(rem): continue
@@ -156,6 +249,19 @@ class Worker:
 
     def sync_disk(self):
         """Per-instance disk usage from LXD (instance state), stored per server. Host filesystem is never read."""
+        if self.docker_mode:
+            rows = [r for r in self.db.execute("SELECT id,container FROM servers WHERE deleted=0 AND status IN ('running','stopped')").fetchall() if CONT_RE.match(r["container"])]
+            if not rows: return
+            rc, out = self.dk("inspect", "--size", "-f", "{{.Name}}|{{.SizeRw}}", *[r["container"] for r in rows], check=False, timeout=120)
+            sizes = {}
+            for l in out.splitlines():
+                n, _, v = l.partition("|")
+                try: sizes[n.strip().lstrip("/")] = int(v)
+                except ValueError: pass
+            for r in rows:                                   # only this container's own writable layer - host disk is never read
+                u = sizes.get(r["container"])
+                self.db.execute("UPDATE servers SET disk_used=?,disk_checked=? WHERE id=?", (u if u is not None and u >= 0 else None, now(), r["id"]))
+            return
         for s in self.db.execute("SELECT id,container,node_id FROM servers WHERE deleted=0 AND status IN ('running','stopped')").fetchall():
             try: t = self.target(s)
             except JobError: continue
@@ -188,49 +294,4 @@ class Worker:
                         add_bolts(self.db, r["user_id"], -r["price"], "Auto-renew " + r["name"], r["container"])
                         self.db.execute("UPDATE servers SET expires_at=?,suspended=0,suspend_reason='' WHERE id=?", (max(r["expires_at"], t) + bd, r["id"]))
                         if r["suspended"]: ops.queue(self.db, r["id"], "start")
-                        ops.notify(self.db, r["user_id"], "Server auto-renewed", "**%s** was renewed for %d BOLTs." % (r["name"], r["price"]), "renewed")
-                    continue
-                except core.Insufficient: pass
-            if not r["suspended"]:
-                with tx(self.db):
-                    self.db.execute("UPDATE servers SET suspended=1,suspend_reason='billing: expired' WHERE id=?", (r["id"],)); ops.queue(self.db, r["id"], "stop")
-                    audit(self.db, None, "server.billing_suspend", r["id"], "")
-                    ops.notify(self.db, r["user_id"], "Server suspended", "**%s** expired and was suspended. Renew within %d day(s) or it will be deleted." % (r["name"], geti(s, "delete_after_days")), "suspended")
-            elif geti(s, "delete_after_days") > 0 and t > r["expires_at"] + geti(s, "delete_after_days") * 86400:
-                with tx(self.db):
-                    ops.queue(self.db, r["id"], "delete"); self.db.execute("UPDATE servers SET status='deleting' WHERE id=?", (r["id"],))
-                    audit(self.db, None, "server.expired_delete", r["id"], "")
-                    ops.notify(self.db, r["user_id"], "Server deleted", "**%s** was deleted after staying expired." % r["name"], "deleted")
-
-    def scan_miners(self):
-        for r in self.db.execute("SELECT * FROM servers WHERE deleted=0 AND suspended=0 AND status='running' AND type='container'").fetchall():
-            try: rc, out = self.lxc("exec", self.target(r), "--", "ps", "-eo", "comm=", check=False, timeout=30)
-            except JobError: continue
-            if rc != 0: continue
-            hit = sorted({l.strip().lower() for l in out.splitlines()} & set(MINERS))
-            if hit:
-                with tx(self.db):
-                    self.db.execute("UPDATE servers SET suspended=1,suspend_reason=? WHERE id=?", ("mining: " + hit[0], r["id"])); ops.queue(self.db, r["id"], "stop")
-                    audit(self.db, None, "server.miner_detected", r["id"], ",".join(hit))
-                    ops.notify(self.db, r["user_id"], "Server suspended — mining detected", "**%s** was suspended for running `%s`. Crypto-mining is not allowed." % (r["name"], hit[0]), "mining")
-                    self.db.execute("INSERT INTO notify(user_id,title,body,kind,created,to_log) VALUES(?,?,?,?,?,1)", (r["user_id"], "Miner detected", "Server #%d (%s) user %d: `%s`" % (r["id"], r["container"], r["user_id"], hit[0]), "staff", now()))
-
-    def tick(self):
-        n = self.process_jobs(); t = now()
-        for name, every, fn in (("sync", 30, self.sync_status), ("disk", 60, self.sync_disk), ("bill", 60, self.billing), ("scan", 300, self.scan_miners)):
-            if t - self.last[name] >= every:
-                self.last[name] = t
-                try: fn()
-                except Exception: log.exception("%s failed", name)
-        return n
-
-    def loop(self):
-        self.recover(); log.info("worker started")
-        while True:
-            try: busy = self.tick()
-            except Exception: log.exception("tick failed"); busy = 0
-            self.sleep(1 if busy else 3)
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    Worker(core.load_config()).loop()
+                        ops.notify(self.db, r["u
