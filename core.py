@@ -13,6 +13,7 @@ DEFAULT_CONFIG = {
     "discord_bot_token": "", "google_client_id": "", "google_client_secret": "",
     "owner_discord_id": "",
     "trusted_proxy": "none", "ssh_port_start": 20000, "ssh_port_end": 29999, "lxc_storage_pool": "default",
+    "backend": "lxd", "docker_enforce_disk": "auto", "docker_lxcfs": "auto",
 }
 DEFAULT_SETTINGS = {
     "site_name": "AxionHost", "discord_invite": "", "announcement": "",
@@ -175,6 +176,7 @@ EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,190}\.[A-Za-z]
 NAME_RE = re.compile(r"^[A-Za-z0-9 ._\-]{2,32}$")
 CONT_RE = re.compile(r"^axp-[0-9]{1,9}-[a-f0-9]{6}$")
 IMG_RE = re.compile(r"^(ubuntu|images|local):[A-Za-z0-9._/\-:]{1,60}$")
+DOCKER_IMG_RE = re.compile(r"^[a-z0-9][a-z0-9._\-]{0,40}(:[A-Za-z0-9._\-]{1,40})?$")
 REMOTE_RE = re.compile(r"^[A-Za-z0-9_\-]{0,32}$")
 LISTEN_RE = re.compile(r"^(0\.0\.0\.0|\[::\]|\[[0-9A-Fa-f:]{2,39}\]|(\d{1,3}\.){3}\d{1,3})$")   # IPv4, [::] (dual-stack) or [ipv6]
 
@@ -234,3 +236,4 @@ def disk_info(s):
     if used is not None and total > 0:
         used = max(0, int(used)); d.update(used_bytes=used, free_bytes=max(0, total - used), pct=min(100.0, round(used * 100.0 / total, 1)), available=True)
     return d
+    
