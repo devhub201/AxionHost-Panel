@@ -71,7 +71,7 @@ ipv6_only_fixes() {
 # ---------- install parts ----------
 install_deps() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates gnupg iproute2 || return 1
+  apt-get update -qq && apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates gnupg iproute2 openssh-client || return 1
   [ -d "$VENV" ] || python3 -m venv "$VENV" || return 1
   "$VENV/bin/pip" install -q --upgrade pip && "$VENV/bin/pip" install -q -r requirements-panel.txt
 }
@@ -185,7 +185,7 @@ UNIT
 install_units() {
   local port; port=$(cfgget port)
   local lis="127.0.0.1:$port"; ip -6 addr show lo 2>/dev/null | grep -q '::1' && lis="$lis [::1]:$port"      # cloudflared resolves "localhost" to ::1 first
-  mk_unit ${SVC}-web "$BRAND Panel (web)" "$VENV/bin/waitress-serve \"--listen=$lis\" --threads=8 --call app:get_app" $'NoNewPrivileges=true\nPrivateTmp=true'
+  mk_unit ${SVC}-web "$BRAND Panel (web)" "$VENV/bin/waitress-serve \"--listen=$lis\" --threads=32 --call app:get_app" $'NoNewPrivileges=true\nPrivateTmp=true'
   mk_unit ${SVC}-worker "$BRAND Panel worker" "$VENV/bin/python worker.py" ""
   mk_unit ${SVC}-panelbot "$BRAND Panel Discord bot" "$VENV/bin/python panel_bot.py" $'NoNewPrivileges=true\nPrivateTmp=true'
   systemctl daemon-reload

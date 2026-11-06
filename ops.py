@@ -64,6 +64,7 @@ def deploy(db, cfg, user, plan_key, node_id, image_key, name, ip=""):
         img = db.execute("SELECT * FROM images WHERE key=? AND enabled=1", (image_key,)).fetchone()
         if not (plan and node and img): raise OpError("Pick a valid plan, location and OS")
         if plan["type"] == "vm" and str(cfg.get("backend", "lxd")).lower() == "docker": raise OpError("This plan is not available on this node")
+        if node["health"] == "offline": raise OpError("That location is offline right now. Pick another or try again shortly.")
         lim = geti(s, "max_servers_per_user")
         if db.execute("SELECT COUNT(*) FROM servers WHERE user_id=? AND deleted=0", (u["id"],)).fetchone()[0] >= lim: raise OpError("Server limit reached (%d)" % lim)
         if db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (node["id"],)).fetchone()[0] >= node["max_servers"]: raise OpError("That location is full. Pick another.")
@@ -82,9 +83,10 @@ def queue(db, sid, act, payload=None):
 def server_action(db, uid, sid, act, image_key=None, ip=""):
     r = owned(db, uid, sid)
     if not r: raise OpError("Server not found", 404)
-    if act not in ("start", "stop", "restart", "reinstall", "delete"): raise OpError("Unknown action")
+    if act not in ("start", "stop", "restart", "reinstall", "delete", "resetpw"): raise OpError("Unknown action")
     if r["status"] in ("provisioning", "deleting"): raise OpError("Server is busy, try again shortly")
     if r["suspended"] and act != "delete": raise OpError("Server is suspended: " + (r["suspend_reason"] or "contact support"), 403)
+    if act == "resetpw" and r["status"] != "running": raise OpError("Start the server first")
     if db.execute("SELECT 1 FROM jobs WHERE server_id=? AND status IN ('queued','running')", (sid,)).fetchone(): raise OpError("Another action is still running")
     payload = {}
     if act == "reinstall":
@@ -95,6 +97,22 @@ def server_action(db, uid, sid, act, image_key=None, ip=""):
         queue(db, sid, act, payload)
         if act in ("reinstall", "delete"): db.execute("UPDATE servers SET status=? WHERE id=?", ("provisioning" if act == "reinstall" else "deleting", sid))
         audit(db, uid, "server." + act, sid, "", ip)
+
+TOOLS = ("sshx", "pinggy")
+
+def tool_action(db, uid, sid, kind, act, ip=""):
+    """Start/stop a helper inside the VPS: sshx (web terminal link) or pinggy (public SSH address). Runs as a worker job."""
+    if kind not in TOOLS or act not in ("start", "stop"): raise OpError("Unknown tool action")
+    r = owned(db, uid, sid)
+    if not r: raise OpError("Server not found", 404)
+    if r["suspended"]: raise OpError("Server is suspended: " + (r["suspend_reason"] or "contact support"), 403)
+    if r["status"] != "running": raise OpError("Start the server first")
+    if db.execute("SELECT 1 FROM jobs WHERE server_id=? AND status IN ('queued','running')", (sid,)).fetchone(): raise OpError("Another action is still running")
+    with tx(db):
+        db.execute("INSERT INTO server_tools(server_id,kind,status,url,note,updated) VALUES(?,?,?,?,?,?) ON CONFLICT(server_id,kind) DO UPDATE SET status=excluded.status,url=CASE WHEN excluded.status='starting' THEN '' ELSE url END,note='',updated=excluded.updated",
+                   (sid, kind, "starting" if act == "start" else "stopping", "", "", now()))
+        queue(db, sid, "tool_" + act, dict(kind=kind))
+        audit(db, uid, "server.tool_" + act, sid, kind, ip)
 
 def renew(db, uid, sid, ip=""):
     s = core.get_settings(db)
@@ -119,6 +137,16 @@ def adjust_bolts(db, actor, uid, delta, reason="", ip=""):
         except ValueError: raise OpError("No such user", 404)
         audit(db, actor, "user.bolts", uid, "%+d %s" % (delta, reason), ip)
     return nb
+
+def give_all(db, actor, amount, reason="", only_with_discord=False, ip=""):
+    """Credit every active (not banned) account. One transaction, one ledger row each."""
+    if not isinstance(amount, int) or amount <= 0 or amount > 1_000_000: raise OpError("Amount must be 1 - 1,000,000")
+    q = "SELECT id FROM users WHERE banned=0" + (" AND discord_id IS NOT NULL AND discord_id!=''" if only_with_discord else "")
+    with tx(db):
+        ids = [r[0] for r in db.execute(q).fetchall()]
+        for uid in ids: add_bolts(db, uid, amount, "Gift: " + ((reason or "from staff")[:80]), "gift:%s" % actor)
+        audit(db, actor, "users.giveall", len(ids), "%+d %s" % (amount, reason), ip)
+    return len(ids)
 
 def set_ban(db, actor, uid, banned, reason="", ip=""):
     with tx(db):
@@ -149,4 +177,3 @@ def notify(db, user_id, title, body, kind="info"):
     """Queue a Discord DM/log message for the bot to deliver."""
     u = db.execute("SELECT discord_id FROM users WHERE id=?", (user_id,)).fetchone()
     db.execute("INSERT INTO notify(user_id,discord_id,title,body,kind,created) VALUES(?,?,?,?,?,?)", (user_id, u["discord_id"] if u else None, title, body, kind, now()))
-        

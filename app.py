@@ -4,7 +4,7 @@ from functools import wraps
 import requests
 from flask import Flask, g, jsonify, make_response, redirect, render_template, request
 from itsdangerous import BadSignature, URLSafeTimedSerializer
-import core, ops
+import core, nodes as nodemod, ops, term
 from core import (now, tx, add_bolts, audit, geti, Insufficient, hash_password, verify_password, enc, dec, sha,
                   EMAIL_RE, NAME_RE, IMG_RE, REMOTE_RE)
 
@@ -22,6 +22,8 @@ def create_app(cfg=None, http=None):
     limiter = core.RateLimiter()
     oauth_ser = URLSafeTimedSerializer(cfg["secret_key"], salt="axp-oauth")
     app.db = db; app.limiter = limiter
+    terms = app.terms = term.TermManager()
+    app.term_argv = None            # tests may replace this with fn(server_row) -> argv
 
     # ---------------- helpers ----------------
     def ip():
@@ -89,12 +91,14 @@ def create_app(cfg=None, http=None):
                     lifetime_earned=u["lifetime_earned"])
 
     def srv_dict(r, reveal=False):
-        n = db.execute("SELECT name,location,flag,host FROM nodes WHERE id=?", (r["node_id"],)).fetchone()
+        n = db.execute("SELECT name,location,flag,host,direct_ssh FROM nodes WHERE id=?", (r["node_id"],)).fetchone()
         d = {k: r[k] for k in ("id", "name", "plan_key", "plan_name", "container", "image_key", "type", "cpu", "ram", "disk", "price", "status",
                                "suspended", "suspend_reason", "ssh_port", "auto_renew", "created_at", "expires_at")}
         d["disk_info"] = core.disk_info(r)
         d["node"] = dict(n) if n else None
-        d["ssh"] = ("ssh root@%s -p %s" % (n["host"] or "<node-ip>", r["ssh_port"])) if n and r["ssh_port"] else ""
+        d["direct_ssh"] = bool(n["direct_ssh"]) if n else True
+        d["ssh"] = ("ssh root@%s -p %s" % (n["host"] or "<node-ip>", r["ssh_port"])) if n and r["ssh_port"] and n["direct_ssh"] else ""
+        d["usage"] = dict(cpu_pct=r["cpu_pct"], mem_used=r["mem_used"], at=r["stat_at"]) if r["status"] == "running" and r["stat_at"] else None
         return d
 
     def new_user(username, email=None, pw=None, discord=None, google=None):
@@ -360,7 +364,7 @@ def create_app(cfg=None, http=None):
         nodes = []
         for n in db.execute("SELECT * FROM nodes WHERE enabled=1"):
             c = db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0]
-            nodes.append(dict(id=n["id"], name=n["name"], location=n["location"], flag=n["flag"], full=c >= n["max_servers"], load=c, cap=n["max_servers"]))
+            nodes.append(dict(id=n["id"], name=n["name"], location=n["location"], flag=n["flag"], full=c >= n["max_servers"] or n["health"] == "offline", offline=n["health"] == "offline", load=c, cap=n["max_servers"]))
         imgs = [dict(key=i["key"], label=i["label"]) for i in db.execute("SELECT * FROM images WHERE enabled=1 ORDER BY sort")]
         return ok(plans=plans, nodes=nodes, images=imgs, bolts=current()["bolts"], bpi=geti(S(), "bolts_per_invite"))
 
@@ -379,7 +383,83 @@ def create_app(cfg=None, http=None):
         r = own(sid)
         if not r: return err("Server not found", 404)
         jobs = [dict(action=j["action"], status=j["status"], result=j["result"], created=j["created"]) for j in db.execute("SELECT * FROM jobs WHERE server_id=? ORDER BY id DESC LIMIT 8", (sid,))]
-        return ok(server=srv_dict(r), jobs=jobs)
+        tools = {t["kind"]: dict(status=t["status"], url=t["url"], note=t["note"]) for t in db.execute("SELECT * FROM server_tools WHERE server_id=?", (sid,))}
+        return ok(server=srv_dict(r), jobs=jobs, tools=tools)
+
+
+    # ---------------- helper tools + in-browser terminal ----------------
+    @app.post("/api/servers/<int:sid>/tools")
+    @api(rate=(20, 60))
+    def server_tool(sid):
+        d = body()
+        return run(lambda: (ops.tool_action(db, current()["id"], sid, d.get("kind"), d.get("action"), ip()), dict())[1])
+
+    def term_argv(r):
+        """(argv, env) that opens an interactive shell in this VPS. Only validated names, no user input."""
+        if app.term_argv: res = app.term_argv(r); return res if isinstance(res, tuple) else (res, None)
+        if not core.CONT_RE.match(r["container"]): raise ops.OpError("Bad container name")
+        n = db.execute("SELECT * FROM nodes WHERE id=?", (r["node_id"],)).fetchone()
+        if str(cfg.get("backend", "lxd")).lower() == "docker": inner = ["docker", "exec", "-it", "-e", "TERM=xterm-256color", r["container"], "sh", "-c", term.SHELL_CMD]
+        else:
+            rem = (n["lxc_remote"] if n else "") or ""
+            if not core.REMOTE_RE.match(rem): raise ops.OpError("Bad node remote")
+            inner = ["lxc", "exec", (rem + ":" if rem else "") + r["container"], "--env", "TERM=xterm-256color", "--", "sh", "-c", term.SHELL_CMD]
+        if n and n["transport"] == "ssh":
+            if n["health"] == "offline": raise ops.OpError("This node is offline right now", 503)
+            sn = ssh_node(n); return sn.argv(inner, tty=True), sn.env()
+        return inner, None
+
+    @app.post("/api/servers/<int:sid>/term")
+    @api(rate=(30, 60))
+    def term_open(sid):
+        r = own(sid)
+        if not r: return err("Server not found", 404)
+        if r["suspended"]: return err("Server is suspended: " + (r["suspend_reason"] or "contact support"), 403)
+        if r["status"] != "running": return err("Start the server first")
+        d = body()
+        try:
+            argv, env = term_argv(r); tid = terms.open(current()["id"], sid, argv, geti(d, "cols") or 100, geti(d, "rows") or 30, env)
+        except ops.OpError as e: return err(e.msg, e.code)
+        except (RuntimeError, OSError) as e: return err(str(e) or "Could not open a terminal", 503)
+        audit(db, current()["id"], "server.term_open", sid, "", ip())
+        return ok(tid=tid)
+
+    def tsess(tid):
+        s = terms.get(tid, current()["id"])
+        return s
+
+    @app.get("/api/term/<tid>/out")
+    @api(rate=(240, 60))
+    def term_out(tid):
+        s = tsess(tid)
+        if not s: return err("Terminal closed", 404)
+        pos = max(0, geti(request.args, "pos"))
+        data, npos, closed = s.read(pos, 12 if request.args.get("wait") == "1" else 0)
+        return ok(d=term.b64(data), pos=npos, closed=closed)
+
+    @app.post("/api/term/<tid>/in")
+    @api(rate=(2400, 60))
+    def term_in(tid):
+        s = tsess(tid)
+        if not s: return err("Terminal closed", 404)
+        t = body().get("d")
+        if not isinstance(t, str) or len(t) > 65536: return err("Bad input")
+        s.write(t.encode("utf-8", "ignore"))
+        return ok()
+
+    @app.post("/api/term/<tid>/resize")
+    @api(rate=(240, 60))
+    def term_resize(tid):
+        s = tsess(tid)
+        if not s: return err("Terminal closed", 404)
+        d = body(); s.resize(max(20, min(geti(d, "cols") or 100, 300)), max(5, min(geti(d, "rows") or 30, 120)))
+        return ok()
+
+    @app.post("/api/term/<tid>/close")
+    @api(rate=(60, 60))
+    def term_close(tid):
+        if tsess(tid): terms.close(tid)
+        return ok()
 
     @app.post("/api/servers")
     @api(rate=(10, 300))
@@ -390,7 +470,9 @@ def create_app(cfg=None, http=None):
     @app.post("/api/servers/<int:sid>/action")
     @api(rate=(40, 60))
     def server_action(sid):
-        d = body(); return run(ops.server_action, db, current()["id"], sid, d.get("action"), d.get("image"), ip())
+        d = body(); res = run(ops.server_action, db, current()["id"], sid, d.get("action"), d.get("image"), ip())
+        if d.get("action") in ("stop", "restart", "reinstall", "delete") and not isinstance(res, tuple): terms.close_server(sid)
+        return res
 
     @app.post("/api/servers/<int:sid>/credentials")
     @api(rate=(20, 300))
@@ -425,7 +507,7 @@ def create_app(cfg=None, http=None):
         return ok(users=db.execute("SELECT COUNT(*) FROM users").fetchone()[0], servers=db.execute("SELECT COUNT(*) FROM servers WHERE deleted=0").fetchone()[0])
 
     # ---------------- admin ----------------
-    def A(role="admin"): return api(role=role)
+    def A(role="admin", rate=None): return api(role=role, rate=rate)
 
     @app.get("/api/admin/stats")
     @A("support")
@@ -442,7 +524,27 @@ def create_app(cfg=None, http=None):
                   circulating=c("SELECT COALESCE(SUM(bolts),0) FROM users"), spent30=-c("SELECT COALESCE(SUM(delta),0) FROM ledger WHERE delta<0 AND created>?", t - 30 * 86400),
                   earned30=c("SELECT COALESCE(SUM(delta),0) FROM ledger WHERE delta>0 AND created>?", t - 30 * 86400),
                   failed_jobs=c("SELECT COUNT(*) FROM jobs WHERE status='failed'"), queued_jobs=c("SELECT COUNT(*) FROM jobs WHERE status IN ('queued','running')"), days=days,
-                  plans=[dict(r) for r in db.execute("SELECT p.name, COUNT(s.id) n FROM plans p LEFT JOIN servers s ON s.plan_key=p.key AND s.deleted=0 GROUP BY p.key ORDER BY n DESC LIMIT 6")])
+                  plans=[dict(r) for r in db.execute("SELECT p.name, COUNT(s.id) n FROM plans p LEFT JOIN servers s ON s.plan_key=p.key AND s.deleted=0 GROUP BY p.key ORDER BY n DESC LIMIT 6")],
+                  nodes=[dict(id=n["id"], name=n["name"], flag=n["flag"], transport=n["transport"], health=n["health"], cpu=n["cpu_total"], ram=n["ram_total"], disk=n["disk_total"], free=n["disk_free"], load=n["load1"],
+                           servers=db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0], cap=n["max_servers"], on=n["enabled"]) for n in db.execute("SELECT * FROM nodes ORDER BY id")])
+
+    @app.post("/api/admin/giveall")
+    @A("owner", rate=(12, 300))
+    def a_giveall():
+        d = body(); return run(lambda: dict(users=ops.give_all(db, current()["id"], d.get("amount") if isinstance(d.get("amount"), int) else -1, str(d.get("reason") or ""), bool(d.get("discord_only")), ip())))
+
+    @app.post("/api/admin/servers/<int:sid>/term")
+    @A("admin", rate=(20, 60))
+    def a_server_term(sid):
+        r = db.execute("SELECT * FROM servers WHERE id=? AND deleted=0", (sid,)).fetchone()
+        if not r: return err("Server not found", 404)
+        if r["status"] != "running": return err("Server is not running")
+        d = body()
+        try: argv, env = term_argv(r); tid = terms.open(current()["id"], sid, argv, geti(d, "cols") or 100, geti(d, "rows") or 30, env)
+        except ops.OpError as e: return err(e.msg, e.code)
+        except (RuntimeError, OSError) as e: return err(str(e) or "Could not open a terminal", 503)
+        audit(db, current()["id"], "server.admin_console", sid, "owner=%s" % r["user_id"], ip())
+        return ok(tid=tid)
 
     @app.get("/api/admin/users")
     @A("support")
@@ -529,6 +631,7 @@ def create_app(cfg=None, http=None):
     def lxcimg(v):
         if not IMG_RE.match(str(v)): raise ValueError("Invalid image (use ubuntu:22.04 or images:debian/12)")
         return str(v)
+        return str(v)
     def listen(v):
         if not core.LISTEN_RE.match(str(v)): raise ValueError("Invalid listen address (use 0.0.0.0 or [::])")
         return str(v)
@@ -536,7 +639,96 @@ def create_app(cfg=None, http=None):
         if not REMOTE_RE.match(str(v)): raise ValueError("Invalid remote")
         return str(v)
     crud("plans", "key", dict(key=slug, name=txt(40), bolts=nz, invites=pos, cpu=nz, ram=nz, disk=nz, type=oneof("container", "vm"), blurb=txt(140), stock=int, enabled=b01, sort=int), "plans")
-    crud("nodes", "id", dict(name=txt(40), location=txt(40), flag=txt(4), host=txt(120), lxc_remote=remote, max_servers=nz, enabled=b01, listen=listen), "nodes")
+    # ---- nodes: local machine, or any SSH server (VPS / home server / Pinggy tunnel) with a password ----
+    NODE_PUB = ("id", "name", "location", "flag", "host", "lxc_remote", "max_servers", "enabled", "listen", "transport", "ssh_host", "ssh_port", "ssh_user", "direct_ssh",
+                "cpu_total", "ram_total", "disk_total", "disk_free", "load1", "health", "health_note", "seen_at")
+    def node_pub(n):
+        d = {k: n[k] for k in NODE_PUB}; d["ssh_pass_set"] = bool(n["ssh_pass_enc"])
+        d["servers"] = db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0]
+        return d
+
+    @app.get("/api/admin/nodes", endpoint="a_list_nodes")
+    @A("support")
+    def a_nodes(): return ok(rows=[node_pub(n) for n in db.execute("SELECT * FROM nodes ORDER BY id")])
+
+    @app.post("/api/admin/nodes", endpoint="a_save_nodes")
+    @A("admin")
+    def a_node_save():
+        d = body(); nid0 = d.get("id")
+        prev = db.execute("SELECT * FROM nodes WHERE id=?", (nid0,)).fetchone() if nid0 not in (None, "") else None
+        g = lambda k, dflt="": d[k] if k in d else (prev[k] if prev else dflt)          # editing keeps whatever the caller did not send
+        try:
+            v = dict(name=txt(40)(g("name") or ""), location=txt(40)(g("location") or ""), flag=txt(4)(g("flag") or ""), host=txt(120)(g("host") or ""),
+                     lxc_remote=remote(g("lxc_remote") or ""), max_servers=nz(g("max_servers", 50) or 50), enabled=b01(g("enabled", 1)), listen=listen(g("listen", "0.0.0.0") or "0.0.0.0"),
+                     direct_ssh=b01(g("direct_ssh", 1)), transport=oneof("local", "ssh")(g("transport", "local") or "local"))
+        except (ValueError, TypeError) as e: return err(str(e) or "Invalid value")
+        if not v["name"]: return err("Name is required")
+        nid = d.get("id"); old = db.execute("SELECT * FROM nodes WHERE id=?", (nid,)).fetchone() if nid not in (None, "") else None
+        if nid not in (None, "") and not old: return err("Node not found", 404)
+        if v["transport"] == "ssh":
+            host, port, user = (old["ssh_host"], old["ssh_port"], old["ssh_user"]) if old else ("", 22, "root")
+            if (d.get("target") or "").strip():
+                try: host, port, tuser = nodemod.parse_target(d["target"])
+                except nodemod.TargetError as e: return err(str(e))
+                user = tuser or user
+            if (d.get("ssh_user") or "").strip():
+                if not nodemod.USER_RE.match(str(d["ssh_user"]).strip()): return err("Bad SSH user name")
+                user = str(d["ssh_user"]).strip()
+            if not host: return err("Enter the SSH address (host:port, tcp://host:port from Pinggy, or 'ssh user@host -p port')")
+            pw = d.get("ssh_pass") or ""
+            if not pw and not (old and old["ssh_pass_enc"]): return err("Enter the SSH password")
+            v.update(ssh_host=host, ssh_port=port, ssh_user=user or "root")
+            if pw: v["ssh_pass_enc"] = enc(cfg["secret_key"], pw)
+            if old and (host, port, v["ssh_user"]) != (old["ssh_host"], old["ssh_port"], old["ssh_user"]): drop_trust(old["id"])
+        else: v.update(ssh_host="", ssh_pass_enc="")
+        with tx(db):
+            if old: db.execute("UPDATE nodes SET %s WHERE id=?" % ",".join(c + "=?" for c in v), (*v.values(), old["id"])); nid = old["id"]
+            else: nid = db.execute("INSERT INTO nodes(%s) VALUES(%s)" % (",".join(v), ",".join("?" * len(v))), list(v.values())).lastrowid
+            audit(db, current()["id"], "nodes.edit" if old else "nodes.create", nid, json.dumps({k: x for k, x in v.items() if k != "ssh_pass_enc"})[:300], ip())
+        return ok(id=nid)
+
+    @app.post("/api/admin/nodes/delete", endpoint="a_del_nodes")
+    @A("admin")
+    def a_node_del():
+        key = body().get("id")
+        if db.execute("SELECT 1 FROM servers WHERE node_id=? AND deleted=0", (key,)).fetchone(): return err("Node has active servers. Disable it instead.")
+        drop_trust(key); db.execute("DELETE FROM nodes WHERE id=?", (key,)); audit(db, current()["id"], "nodes.delete", key, "", ip()); return ok()
+
+    def ssh_node(n):
+        try: return nodemod.SSHNode(n, dec(cfg["secret_key"], n["ssh_pass_enc"]) if n["ssh_pass_enc"] else "", os.path.dirname(os.path.abspath(cfg["db_path"])))
+        except Exception as e: raise ops.OpError("SSH settings invalid: %s" % e)
+
+    def drop_trust(nid):
+        n = db.execute("SELECT * FROM nodes WHERE id=?", (nid,)).fetchone()
+        if n and n["transport"] == "ssh" and n["ssh_host"]:
+            try: ssh_node(n).reset_trust()
+            except Exception: pass
+
+    @app.post("/api/admin/nodes/<int:nid>/test", endpoint="a_test_nodes")
+    @A("admin", rate=(12, 60))
+    def a_node_test(nid):
+        n = db.execute("SELECT * FROM nodes WHERE id=?", (nid,)).fetchone()
+        if not n: return err("Node not found", 404)
+        docker_mode = str(cfg.get("backend", "lxd")).lower() == "docker"
+        try:
+            if n["transport"] == "ssh": rc, out = ssh_node(n).run(["sh", "-s"], nodemod.HEALTH_SCRIPT, 50)
+            else:
+                import subprocess
+                p = subprocess.run(["sh", "-s"], input=nodemod.HEALTH_SCRIPT, capture_output=True, text=True, timeout=30); rc, out = p.returncode, (p.stdout + p.stderr).strip()
+        except ops.OpError as e: return err(e.msg, e.code)
+        except Exception as e: return err("Test failed: %s" % e)
+        if rc != 0:
+            db.execute("UPDATE nodes SET health='offline',health_note=? WHERE id=?", (out[-200:], nid)); return err(out or "Connection failed", 502)
+        h = nodemod.parse_health(out); eng = h["docker"] if docker_mode else h["lxd"]
+        db.execute("UPDATE nodes SET health=?,health_note=?,cpu_total=?,ram_total=?,disk_total=?,disk_free=?,load1=?,seen_at=? WHERE id=?",
+                   ("online" if eng else "offline", "" if eng else ("Docker is not installed or not running" if docker_mode else "LXD is not installed or not running"), h["cpu_total"], h["ram_total"], h["disk_total"], h["disk_free"], h["load1"], now(), nid))
+        audit(db, current()["id"], "nodes.test", nid, "ok" if eng else "engine missing", ip())
+        return ok(report=dict(cpu=h["cpu_total"], ram=h["ram_total"], disk=h["disk_total"], free=h["disk_free"], load=h["load1"], docker=h["docker"], lxd=h["lxd"], engine="docker" if docker_mode else "lxd", engine_ok=eng))
+
+    @app.post("/api/admin/nodes/<int:nid>/reset_trust", endpoint="a_trust_nodes")
+    @A("admin")
+    def a_node_trust(nid):
+        drop_trust(nid); audit(db, current()["id"], "nodes.reset_trust", nid, "", ip()); return ok()
     crud("images", "key", dict(key=slug, label=txt(40), lxc_image=lxcimg, enabled=b01, sort=int), "images")
     crud("promos", "code", dict(code=lambda v: re.sub(r"[^A-Z0-9_\-]", "", str(v).upper())[:30] or (_ for _ in ()).throw(ValueError("bad code")), bolts=nz, max_uses=nz, expires=pos, enabled=b01, note=txt(100)), "promos")
     crud("quests", "key", dict(key=slug, title=txt(60), blurb=txt(140), bolts=nz, kind=oneof("link_discord", "set_email", "first_deploy"), enabled=b01), "quests")

@@ -1,7 +1,7 @@
 """AxionHost Panel Bot — manage the panel from Discord (slash commands, premium embeds, persistent buttons).
 Shares panel.db with the web app + worker. Invite tracking & booster rewards credit BOLTs automatically.
 Run:  python panel_bot.py   (systemd: axionhost-panelbot)"""
-import asyncio, logging, time
+import asyncio, logging, sys, time
 import discord
 from discord import app_commands
 import core, ops
@@ -38,9 +38,15 @@ class PanelBot(discord.Client):
     async def setup_hook(self):
         self.add_view(MainPanelView(self))
         g = self.cfg.get("discord_guild_id")
-        if g:
-            obj = discord.Object(id=int(g)); self.tree.copy_global_to(guild=obj); await self.tree.sync(guild=obj)
-        else: await self.tree.sync()
+        try:
+            if g:
+                obj = discord.Object(id=int(g)); self.tree.copy_global_to(guild=obj); await self.tree.sync(guild=obj)
+            else: await self.tree.sync()
+            log.info("slash commands synced")
+        except discord.Forbidden:
+            log.error("Cannot register slash commands: the bot is not in server %s or was invited WITHOUT the 'applications.commands' scope. Re-invite it with scopes 'bot applications.commands'. The bot keeps running (buttons, DMs, rewards still work).", g or "(global)")
+        except (discord.HTTPException, ValueError) as e:
+            log.error("Slash command sync failed: %s (check discord_guild_id). The bot keeps running.", e)
         self.loop.create_task(self.background())
 
     async def on_ready(self):
@@ -233,6 +239,101 @@ def staff(bot, it, level="admin"):
 
 async def deny(it): await it.response.send_message(embed=bad("You don't have permission for that."), ephemeral=True)
 
+# ---------------- more command bodies (module level so they are testable) ----------------
+def _mine(bot, u, sid): return bot.db.execute("SELECT * FROM servers WHERE id=? AND user_id=? AND deleted=0", (sid, u["id"])).fetchone()
+
+async def cmd_profile(bot, it, member=None):
+    m = member or it.user; u = bot.user(m.id)
+    if not u: return await need_account(bot, it) if m.id == it.user.id else await it.response.send_message(embed=bad("That user has no panel account."), ephemeral=True)
+    n = bot.db.execute("SELECT COUNT(*) FROM servers WHERE user_id=? AND deleted=0", (u["id"],)).fetchone()[0]
+    inv = bot.db.execute("SELECT COUNT(*) FROM invite_credits WHERE inviter_id=? AND credited=1", (str(m.id),)).fetchone()[0]
+    rank = bot.db.execute("SELECT COUNT(*)+1 FROM users WHERE banned=0 AND lifetime_earned>?", (u["lifetime_earned"],)).fetchone()[0]
+    await it.response.send_message(embed=emb("%s" % u["username"], fields=[("BOLTs", str(u["bolts"]), True), ("Earned all-time", str(u["lifetime_earned"]), True), ("Rank", "#%d" % rank, True),
+        ("Servers", str(n), True), ("Invites", str(inv), True), ("Joined", ts(u["created_at"]), True)]), ephemeral=True)
+
+async def cmd_leaderboard(bot, it, by="earned"):
+    col = "bolts" if by == "bolts" else "lifetime_earned"
+    rows = bot.db.execute("SELECT username,%s v FROM users WHERE banned=0 AND role!='owner' ORDER BY v DESC LIMIT 10" % col).fetchall()
+    medals = ["🥇", "🥈", "🥉"]
+    desc = "\n".join("%s **%s** — %d BOLTs" % (medals[i] if i < 3 else "`#%d`" % (i + 1), r["username"], r["v"]) for i, r in enumerate(rows)) or "Nobody yet."
+    await it.response.send_message(embed=emb("🏆 Leaderboard — " + ("richest" if col == "bolts" else "top earners"), desc), ephemeral=True)
+
+async def cmd_status(bot, it):
+    ns = bot.db.execute("SELECT * FROM nodes WHERE enabled=1 ORDER BY id").fetchall()
+    lines = []
+    for n in ns:
+        c = bot.db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0]
+        h = n["health"] or "online"
+        lines.append("%s **%s %s** — %s • %d/%d servers" % ("🟢" if h == "online" else "🔴", n["flag"], n["name"], h, c, n["max_servers"]))
+    await it.response.send_message(embed=emb("Node status", "\n".join(lines) or "No nodes."), ephemeral=True)
+
+async def cmd_renew(bot, it, server_id):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    try: exp = ops.renew(bot.db, u["id"], server_id, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Renewed", "Server #%d now runs until %s." % (server_id, "<t:%d:f>" % exp)), ephemeral=True)
+
+async def cmd_ssh(bot, it, server_id):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    r = _mine(bot, u, server_id)
+    if not r: return await it.response.send_message(embed=bad("Server not found."), ephemeral=True)
+    n = bot.db.execute("SELECT * FROM nodes WHERE id=?", (r["node_id"],)).fetchone()
+    pw = core.dec(bot.cfg["secret_key"], r["root_pw_enc"]) if r["root_pw_enc"] else ""
+    direct = bool(n and n["direct_ssh"] and r["ssh_port"])
+    cmd = "`ssh root@%s -p %s`" % (n["host"] or "<node-ip>", r["ssh_port"]) if direct else "Direct SSH is not available on this node — open **%s/dashboard** and use the in-browser terminal or the SSHX / Pinggy tools." % bot.url()
+    await it.response.send_message(embed=emb("Connect to %s" % r["name"], cmd, fields=[("User", "root", True), ("Password", "||%s||" % pw if pw else "-", True)]), ephemeral=True)
+
+async def cmd_resetpw(bot, it, server_id):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    try: ops.server_action(bot.db, u["id"], server_id, "resetpw", None, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Password reset queued", "A new root password is being set. Run `/ssh server_id:%d` in ~10 seconds to see it." % server_id), ephemeral=True)
+
+async def cmd_power(bot, it, server_id, act):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    if not _mine(bot, u, server_id): return await it.response.send_message(embed=bad("Server not found."), ephemeral=True)
+    try: ops.server_action(bot.db, u["id"], server_id, act, None, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good(act.capitalize() + " queued", "Server #%d" % server_id), ephemeral=True)
+
+async def cmd_tool(bot, it, server_id, kind):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    try: ops.tool_action(bot.db, u["id"], server_id, kind, "start", "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good(kind.upper() + " starting", "It takes ~20 seconds. Run `/tool` again or open the manage page to see the link."), ephemeral=True)
+
+async def cmd_help(bot, it):
+    await it.response.send_message(embed=emb("AxionHost commands", fields=[
+        ("Account", "`/panel` `/profile` `/balance` `/daily` `/quests` `/redeem` `/invites` `/leaderboard`", False),
+        ("Servers", "`/plans` `/deploy` `/servers` `/status` `/renew` `/start` `/stop` `/restart` `/ssh` `/resetpw` `/tool`", False),
+        ("Staff", "`/admin stats` `lookup` `bolts` `giveall` `nodes` `audit` `server` `ban` `unban` `maintenance` `announce` `promo` `plan`", False)]), ephemeral=True)
+
+async def adm_giveall(bot, it, amount, reason=""):
+    me = staff(bot, it, "owner")
+    if not me: return await deny(it)
+    try: n = ops.give_all(bot.db, me["id"], amount, reason, False, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Gift sent", "**+%d BOLTs** to **%d** users." % (amount, n)), ephemeral=True)
+
+async def adm_nodes(bot, it):
+    if not staff(bot, it, "support"): return await deny(it)
+    rows = bot.db.execute("SELECT * FROM nodes ORDER BY id").fetchall(); out = []
+    for n in rows:
+        c = bot.db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0]
+        h = n["health"] or "online"
+        out.append("%s **#%d %s** (%s) — %s%s • %d/%d%s" % ("🟢" if h == "online" else "🔴", n["id"], n["name"], n["transport"], h, " • %s vCPU" % n["cpu_total"] if n["cpu_total"] else "", c, n["max_servers"], "" if n["enabled"] else " • disabled"))
+    await it.response.send_message(embed=emb("Nodes", "\n".join(out) or "No nodes."), ephemeral=True)
+
+async def adm_audit(bot, it, count=10):
+    if not staff(bot, it, "admin"): return await deny(it)
+    rows = bot.db.execute("SELECT a.*,u.username FROM audit a LEFT JOIN users u ON u.id=a.actor ORDER BY a.id DESC LIMIT ?", (max(1, min(count, 25)),)).fetchall()
+    await it.response.send_message(embed=emb("Audit log", "\n".join("%s **%s** `%s` %s" % (ts(r["created"]), r["username"] or r["actor"], r["action"], r["target"] or "") for r in rows) or "Empty."), ephemeral=True)
+
 def register(bot):
     t = bot.tree
 
@@ -279,6 +380,31 @@ def register(bot):
         s = bot.S()
         await it.response.send_message(embed=emb("Invites", "Each invite that stays **%d days** pays **%d BOLTs**." % (geti(s, "invite_min_age_days"), geti(s, "bolts_per_invite")),
             fields=[("Rewarded", str(d.get(1, 0)), True), ("Pending", str(d.get(0, 0)), True), ("Left early", str(d.get(2, 0)), True)]), ephemeral=True)
+
+    @t.command(name="profile", description="Your (or someone's) profile and rank")
+    async def profile(it, member: discord.User = None): await cmd_profile(bot, it, member)
+    @t.command(name="leaderboard", description="Top earners")
+    @app_commands.choices(by=[app_commands.Choice(name="Top earners (all-time)", value="earned"), app_commands.Choice(name="Richest now", value="bolts")])
+    async def leaderboard(it, by: app_commands.Choice[str] = None): await cmd_leaderboard(bot, it, by.value if by else "earned")
+    @t.command(name="status", description="Node status and capacity")
+    async def status(it): await cmd_status(bot, it)
+    @t.command(name="renew", description="Renew a server for another billing period")
+    async def renew(it, server_id: int): await cmd_renew(bot, it, server_id)
+    @t.command(name="ssh", description="SSH command and root password of your server")
+    async def ssh(it, server_id: int): await cmd_ssh(bot, it, server_id)
+    @t.command(name="resetpw", description="Set a new random root password on your server")
+    async def resetpw(it, server_id: int): await cmd_resetpw(bot, it, server_id)
+    @t.command(name="start", description="Start your server")
+    async def start(it, server_id: int): await cmd_power(bot, it, server_id, "start")
+    @t.command(name="stop", description="Stop your server")
+    async def stop(it, server_id: int): await cmd_power(bot, it, server_id, "stop")
+    @t.command(name="restart", description="Restart your server")
+    async def restart(it, server_id: int): await cmd_power(bot, it, server_id, "restart")
+    @t.command(name="tool", description="Start SSHX (web terminal) or Pinggy (public SSH) on your server")
+    @app_commands.choices(kind=[app_commands.Choice(name="sshx", value="sshx"), app_commands.Choice(name="pinggy", value="pinggy")])
+    async def tool(it, server_id: int, kind: app_commands.Choice[str]): await cmd_tool(bot, it, server_id, kind.value)
+    @t.command(name="help", description="List all commands")
+    async def help_(it): await cmd_help(bot, it)
 
     # ---- staff ----
     adm = app_commands.Group(name="admin", description="AxionHost staff tools")
@@ -386,10 +512,22 @@ def register(bot):
         await channel.send(embed=emb("AxionHost Panel", "Deploy and manage VPS servers with **BOLTs**.\nEarn BOLTs with daily rewards, quests, invites and boosts."), view=MainPanelView(bot))
         await it.response.send_message(embed=good("Posted", channel.mention), ephemeral=True)
 
+    @adm.command(name="giveall", description="Give BOLTs to every user (owner)")
+    async def a_giveall(it, amount: int, reason: str = "gift"): await adm_giveall(bot, it, amount, reason)
+    @adm.command(name="nodes", description="Node list and health")
+    async def a_nodes(it): await adm_nodes(bot, it)
+    @adm.command(name="audit", description="Recent audit log entries")
+    async def a_audit(it, count: int = 10): await adm_audit(bot, it, count)
+
     t.add_command(adm)
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = core.load_config()
     if not cfg["discord_bot_token"]: raise SystemExit("Set discord_bot_token in config.panel.json")
-    PanelBot(cfg).run(cfg["discord_bot_token"], log_handler=None)
+    try:
+        PanelBot(cfg).run(cfg["discord_bot_token"], log_handler=None)
+    except discord.LoginFailure:
+        print("FATAL: Discord rejected the bot token. Copy it again from Developer Portal -> Bot -> Reset Token, then: ./install-panel.sh reconfigure-bot", file=sys.stderr); sys.exit(78)
+    except discord.PrivilegedIntentsRequired:
+        print("FATAL: enable 'Server Members Intent' in Developer Portal -> Bot -> Privileged Gateway Intents, then restart the bot.", file=sys.stderr); sys.exit(78)

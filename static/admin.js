@@ -97,5 +97,7 @@ S.ledger = async () => { cur = "ledger"; const r = await api("GET", "/api/admin/
 S.audit = async () => { cur = "audit"; const r = await api("GET", "/api/admin/audit"); if (!r.ok) return; pane.innerHTML = hdr("Audit log", "Every sensitive action, with who and from where.") + tbl(["When", "Actor", "Action", "Target", "Detail", "IP"], r.rows.map(x => `<tr><td class="sub">${dt(x.created)}</td><td>${esc(x.actor_name || "system")}</td><td><code>${esc(x.action)}</code></td><td>${esc(x.target)}</td><td class="sub">${esc(x.detail)}</td><td class="sub">${esc(x.ip)}</td></tr>`)); };
 for (const k of ["plans", "nodes", "images", "promos", "quests"]) { const f = S[k]; S[k] = () => { cur = k; return f(); }; }
 window.addEventListener("hashchange", () => { const n = location.hash.slice(1); if (S[n]) show(n); });
-show((location.hash || "#overview").slice(1));
+window.AXADM = { S, pane, hdr, tbl, yn, show, canW, isOwner, cur: v => { cur = v; } };
+const start = () => show((location.hash || "#overview").slice(1));
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start); else start();
 })();

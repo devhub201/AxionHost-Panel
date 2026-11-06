@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block title %}Sign in · {{ site.site_name }}{% endblock %}{% block page %}login{% endblock %}
 {% block body %}<div class="auth"><div class="abox">
-<svg class="lg"><use href="#A"/></svg>
+<svg class="alogo"><use href="#A"/></svg>
 <h1 id="ttl">Welcome back</h1><p class="s" id="sub">Sign in to manage your servers</p>
 <div class="card">
   {% if providers.discord %}<a class="btn dcb block lg" href="/auth/discord?next={{ next|urlencode }}"><svg><use href="#dc"/></svg>Continue with Discord</a>{% endif %}

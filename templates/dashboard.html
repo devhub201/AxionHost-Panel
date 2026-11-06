@@ -1,10 +1,17 @@
 {% extends "base.html" %}{% block title %}Dashboard · {{ site.site_name }}{% endblock %}{% block page %}dashboard{% endblock %}
 {% block content %}
 <div class="head"><div><h1 class="t">Active Services</h1><p class="sub">Welcome back, {{ user.username }}</p></div><a class="btn w" href="/deploy">+ Deploy server</a></div>
-<div class="grid g3 keep" style="margin-bottom:20px">
+<div class="grid g4 keep" style="margin-bottom:20px">
   <div class="card stat"><div class="l">BOLTs</div><b id="s-bolts">{{ user.bolts }}</b><div class="s">Available balance</div></div>
   <div class="card stat"><div class="l">Servers</div><b id="s-srv">–</b><div class="s" id="s-run">&nbsp;</div></div>
-  <div class="card stat" style="grid-column:span 1"><div class="l">Daily reward</div><b style="font-size:18px;margin:12px 0 8px"><button class="btn sm w" id="daily">Claim +{{ site.daily_bolts }}</button></b><div class="s" id="dmsg">Every 24 hours</div></div>
+  <div class="card stat"><div class="l">Expiring soon</div><b id="s-exp">–</b><div class="s" id="s-expm">&nbsp;</div></div>
+  <div class="card stat"><div class="l">Daily reward</div><b style="font-size:18px;margin:12px 0 8px"><button class="btn sm w" id="daily">Claim +{{ site.daily_bolts }}</button></b><div class="s" id="dmsg">Every 24 hours</div></div>
 </div>
+<div class="row sp" id="fbar" hidden style="margin-bottom:14px"><div class="row" style="gap:6px"><button class="chip on" data-f="all">All</button><button class="chip" data-f="running">Running</button><button class="chip" data-f="stopped">Stopped</button><button class="chip" data-f="soon">Expiring</button></div><input class="i" id="fq" placeholder="Search servers…" style="max-width:240px"></div>
 <div id="list" class="grid"><div class="sk"></div><div class="sk"></div></div>
+<div class="grid g2" style="margin-top:20px">
+  <div class="card"><h3>Recent activity</h3><div class="d">Your latest BOLTs movements.</div><div id="act"><div class="sk" style="height:44px"></div></div></div>
+  <div class="card"><h3>Quick actions</h3><div class="d">Get more done in one tap.</div><div class="qa"><a class="btn" href="/deploy">Deploy a server</a><a class="btn" href="/earn">Earn BOLTs</a><a class="btn" href="/billing">Billing &amp; history</a><a class="btn" href="/settings">Account settings</a></div></div>
+</div>
 {% endblock %}
+{% block scripts %}<link rel="stylesheet" href="/static/dashboard.css"><script src="/static/dashboard.js"></script>{% endblock %}

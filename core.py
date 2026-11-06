@@ -1,6 +1,6 @@
 """AxionHost Panel — core: config, database, security helpers, BOLTs ledger.
 Original code. Shared by the web app (app.py) and the worker (worker.py)."""
-import base64, hashlib, hmac, json, os, re, secrets, sqlite3, time
+import threading, base64, hashlib, hmac, json, os, re, secrets, sqlite3, time
 from contextlib import contextmanager
 
 PANEL_VERSION = "1.0.0"
@@ -63,13 +63,15 @@ CREATE TABLE IF NOT EXISTS plans(key TEXT PRIMARY KEY, name TEXT NOT NULL, bolts
   cpu INTEGER NOT NULL, ram INTEGER NOT NULL, disk INTEGER NOT NULL, type TEXT NOT NULL DEFAULT 'container',
   blurb TEXT DEFAULT '', stock INTEGER NOT NULL DEFAULT -1, enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, location TEXT DEFAULT '', flag TEXT DEFAULT '',
-  host TEXT DEFAULT '', lxc_remote TEXT DEFAULT '', max_servers INTEGER NOT NULL DEFAULT 50, enabled INTEGER NOT NULL DEFAULT 1, listen TEXT NOT NULL DEFAULT '0.0.0.0');
+  host TEXT DEFAULT '', lxc_remote TEXT DEFAULT '', max_servers INTEGER NOT NULL DEFAULT 50, enabled INTEGER NOT NULL DEFAULT 1, listen TEXT NOT NULL DEFAULT '0.0.0.0',
+  transport TEXT NOT NULL DEFAULT 'local', ssh_host TEXT DEFAULT '', ssh_port INTEGER DEFAULT 22, ssh_user TEXT DEFAULT 'root', ssh_pass_enc TEXT DEFAULT '', direct_ssh INTEGER NOT NULL DEFAULT 1,
+  cpu_total INTEGER, ram_total INTEGER, disk_total INTEGER, disk_free INTEGER, load1 REAL, health TEXT NOT NULL DEFAULT 'unknown', health_note TEXT DEFAULT '', seen_at INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS images(key TEXT PRIMARY KEY, label TEXT NOT NULL, lxc_image TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS servers(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, plan_key TEXT NOT NULL, plan_name TEXT NOT NULL,
   node_id INTEGER NOT NULL, name TEXT NOT NULL, container TEXT UNIQUE NOT NULL, image_key TEXT NOT NULL, lxc_image TEXT NOT NULL, type TEXT NOT NULL,
   cpu INTEGER, ram INTEGER, disk INTEGER, price INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'provisioning',
   suspended INTEGER NOT NULL DEFAULT 0, suspend_reason TEXT DEFAULT '', ssh_port INTEGER UNIQUE, root_pw_enc TEXT DEFAULT '',
-  auto_renew INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, note TEXT DEFAULT '', disk_used INTEGER, disk_checked INTEGER);
+  auto_renew INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, note TEXT DEFAULT '', disk_used INTEGER, disk_checked INTEGER, cpu_pct REAL, mem_used INTEGER, stat_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_servers_user ON servers(user_id, deleted);
 CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, action TEXT NOT NULL, payload TEXT DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'queued', result TEXT DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL, updated INTEGER NOT NULL);
@@ -80,6 +82,7 @@ CREATE TABLE IF NOT EXISTS quests(key TEXT PRIMARY KEY, title TEXT NOT NULL, blu
 CREATE TABLE IF NOT EXISTS quest_claims(quest_key TEXT NOT NULL, user_id INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(quest_key, user_id));
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, actor INTEGER, action TEXT NOT NULL, target TEXT DEFAULT '', detail TEXT DEFAULT '', ip TEXT DEFAULT '', created INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS server_tools(server_id INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'stopped', url TEXT DEFAULT '', note TEXT DEFAULT '', updated INTEGER DEFAULT 0, PRIMARY KEY(server_id,kind));
 CREATE TABLE IF NOT EXISTS notify(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, discord_id TEXT, title TEXT NOT NULL, body TEXT DEFAULT '', kind TEXT DEFAULT 'info',
   created INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0, to_log INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS invite_credits(invitee_id TEXT PRIMARY KEY, inviter_id TEXT NOT NULL, joined INTEGER NOT NULL, credited INTEGER NOT NULL DEFAULT 0);
@@ -93,11 +96,22 @@ SEED_QUESTS = [("link_discord", "Link your Discord", "Connect Discord to your ac
 
 def now(): return int(time.time())
 
-def connect(path):
+def _open(path):
     db = sqlite3.connect(path, timeout=30, isolation_level=None, check_same_thread=False)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL"); db.execute("PRAGMA foreign_keys=ON"); db.execute("PRAGMA busy_timeout=30000")
     return db
+
+class DB:
+    """One sqlite connection per thread (web threads, long-polling terminal requests and the worker never share a cursor)."""
+    def __init__(self, path): self._path, self._l = path, threading.local()
+    def _c(self):
+        c = getattr(self._l, "c", None)
+        if c is None: c = self._l.c = _open(self._path)
+        return c
+    def __getattr__(self, name): return getattr(self._c(), name)
+
+def connect(path): return DB(path)
 
 @contextmanager
 def tx(db):
@@ -113,8 +127,13 @@ def init_db(db):
     cols = {r[1] for r in db.execute("PRAGMA table_info(servers)")}          # migrate older databases
     for c in ("disk_used", "disk_checked"):
         if c not in cols: db.execute("ALTER TABLE servers ADD COLUMN %s INTEGER" % c)
-    if "listen" not in {r[1] for r in db.execute("PRAGMA table_info(nodes)")}:
-        db.execute("ALTER TABLE nodes ADD COLUMN listen TEXT NOT NULL DEFAULT '0.0.0.0'")
+    for tbl, add in (("nodes", (("listen", "TEXT NOT NULL DEFAULT '0.0.0.0'"), ("transport", "TEXT NOT NULL DEFAULT 'local'"), ("ssh_host", "TEXT DEFAULT ''"), ("ssh_port", "INTEGER DEFAULT 22"),
+                                  ("ssh_user", "TEXT DEFAULT 'root'"), ("ssh_pass_enc", "TEXT DEFAULT ''"), ("direct_ssh", "INTEGER NOT NULL DEFAULT 1"), ("cpu_total", "INTEGER"), ("ram_total", "INTEGER"),
+                                  ("disk_total", "INTEGER"), ("disk_free", "INTEGER"), ("load1", "REAL"), ("health", "TEXT NOT NULL DEFAULT 'unknown'"), ("health_note", "TEXT DEFAULT ''"), ("seen_at", "INTEGER DEFAULT 0"))),
+                     ("servers", (("cpu_pct", "REAL"), ("mem_used", "INTEGER"), ("stat_at", "INTEGER")))):
+        have = {r[1] for r in db.execute("PRAGMA table_info(%s)" % tbl)}
+        for col, typ in add:
+            if col not in have: db.execute("ALTER TABLE %s ADD COLUMN %s %s" % (tbl, col, typ))
     with tx(db):
         for k, v in DEFAULT_SETTINGS.items():
             db.execute("INSERT OR IGNORE INTO settings(k,v) VALUES(?,?)", (k, v))
@@ -236,4 +255,3 @@ def disk_info(s):
     if used is not None and total > 0:
         used = max(0, int(used)); d.update(used_bytes=used, free_bytes=max(0, total - used), pct=min(100.0, round(used * 100.0 / total, 1)), available=True)
     return d
-    

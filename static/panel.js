@@ -87,21 +87,38 @@ P.deploy = () => {
 
 P.server = () => {
   const sid = $("#sv").dataset.sid, V = $("#sv"); let me = null, timer;
+  window.AXT && AXT.init(sid, () => setTimeout(load, 400));
   async function load() {
     const r = await api("GET", "/api/servers/" + sid);
     if (!r.ok) { V.innerHTML = '<div class="card empty"><b>Server not found</b><a class="btn" href="/dashboard">Back to dashboard</a></div>'; return; }
     const s = r.server, busyNow = ["provisioning", "deleting"].includes(s.status), off = s.suspended || busyNow;
-    V.innerHTML = `<div class="head"><div><div class="row"><a class="sub" href="/dashboard">← Servers</a></div><h1 class="t">${esc(s.name)}</h1><p class="sub">${esc(s.plan_name)} • ${esc((s.node || {}).name || "")} • ${esc(s.container)}</p></div>${pill(s.status, s.suspended)}</div>
+    const running = s.status === "running", nd = s.node || {}, daysLeft = Math.max(0, (s.expires_at - Date.now() / 1000) / 86400), pctLeft = Math.min(100, daysLeft / 30 * 100);
+    const crow = (l, v, id) => `<div class="crow"><span>${l}</span><code>${esc(v)}</code><button data-copy="${esc(v)}" ${id ? 'id="' + id + '"' : ""}>Copy</button></div>`;
+    V.innerHTML = `<div class="hero"><div class="top2"><div><a class="sub" href="/dashboard">← All servers</a><h1>${esc(s.name)}</h1>
+      <div class="meta">${pill(s.status, s.suspended)}<span><b>${esc(s.plan_name)}</b></span><span>${esc((nd.flag || "") + " " + (nd.name || ""))}</span><span>${esc(s.image_key || "")}</span><span>#${s.id}</span></div></div>
+      <div class="meta" style="text-align:right"><div><div style="font-size:12px;letter-spacing:.08em;text-transform:uppercase">Renews</div><b style="font-size:18px">${left(s.expires_at)}</b></div></div></div>
+      <div class="acts"><button class="btn w" data-a="start" ${off || running ? "disabled" : ""}>▶ Start</button><button class="btn" data-a="restart" ${off || !running ? "disabled" : ""}>⟳ Restart</button><button class="btn" data-a="stop" ${off || !running ? "disabled" : ""}>■ Stop</button><button class="btn" id="cr" ${busyNow ? "disabled" : ""}>🔑 Root password</button></div></div>
     ${s.suspended ? `<div class="card" style="border-color:rgba(248,113,113,.4);margin-bottom:16px"><b>Suspended</b><div class="sub">${esc(s.suspend_reason)}${s.suspend_reason.startsWith("billing") ? " — renew to restore it." : ""}</div></div>` : ""}
-    ${s.status === "provisioning" ? '<div class="card" style="margin-bottom:16px"><b>Setting up your server…</b><div class="sub">This usually takes under a minute. This page updates automatically.</div><div class="bar" style="margin-top:12px"><i style="width:60%;animation:pulse 1.2s infinite"></i></div></div>' : ""}
-    <div class="grid g2 keep" style="margin-bottom:16px"><div class="card stat"><div class="l">CPU</div><b>${s.cpu}</b><div class="s">vCPU cores</div></div><div class="card stat"><div class="l">Memory</div><b>${s.ram}</b><div class="s">GB RAM</div></div></div>
-    ${diskCard(s.disk_info)}<div class="grid g2"><div class="card"><h3>Power</h3><div class="d">Control your server.</div><div class="row"><button class="btn w sm" data-a="start" ${off || s.status === "running" ? "disabled" : ""}>Start</button><button class="btn sm" data-a="restart" ${off || s.status !== "running" ? "disabled" : ""}>Restart</button><button class="btn sm" data-a="stop" ${off || s.status !== "running" ? "disabled" : ""}>Stop</button><button class="btn sm" id="re" ${busyNow || (s.suspended && !s.suspend_reason.startsWith("billing")) ? "disabled" : ""}>Reinstall</button><button class="btn sm red" id="del" ${busyNow ? "disabled" : ""}>Delete</button></div></div>
-    <div class="card"><h3>Connect</h3><div class="d">SSH with the root account.</div>${s.ssh ? `<div class="row"><code class="grow" style="overflow-x:auto">${esc(s.ssh)}</code><button class="btn sm" id="cp">Copy</button></div>` : ""}<div style="margin-top:12px"><button class="btn sm w" id="cr" ${s.status === "provisioning" ? "disabled" : ""}>Show root password</button></div></div>
-    <div class="card"><h3>Billing</h3><div class="d">${num(s.price)} BOLTs every 30 days.</div><dl class="kv"><dt>Expires</dt><dd>${dt(s.expires_at)} (${left(s.expires_at)})</dd></dl><div class="row" style="margin-top:14px"><button class="btn w sm" id="rn" ${busyNow ? "disabled" : ""}>Renew now (+30 days)</button><label class="row" style="gap:8px;font-size:13px;color:var(--mut)">Auto-renew <span class="sw"><input type="checkbox" id="ar" ${s.auto_renew ? "checked" : ""}><span></span></span></label></div></div>
-    <div class="card"><h3>Settings</h3><div class="d">Rename your server.</div><div class="row"><input class="i grow" id="rn2" value="${esc(s.name)}" maxlength="32"><button class="btn sm" id="rns">Save</button></div></div></div>
-    ${r.jobs.length ? `<h3 style="margin:24px 0 10px">Recent activity</h3><div class="tw"><table><tbody>${r.jobs.map(j => `<tr><td>${esc(j.action)}</td><td>${esc(j.status)}</td><td class="sub">${j.status === "failed" ? esc(j.result) : ""}</td><td class="sub">${dt(j.created)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+    ${s.status === "provisioning" ? '<div class="card" style="margin-bottom:16px"><b>Setting up your server…</b><div class="sub">Pulling the image and installing SSH. Usually 1–3 minutes. This page updates automatically.</div><div class="bar" style="margin-top:12px"><i style="width:60%;animation:pulse 1.2s infinite"></i></div></div>' : ""}
+    <div class="sp-tiles"><div class="tile"><div class="l">CPU</div><b>${s.cpu}<small>vCPU</small></b><div class="s">dedicated limit</div></div><div class="tile"><div class="l">Memory</div><b>${s.ram}<small>GB</small></b><div class="s">RAM, no swap</div></div>
+      <div class="tile"><div class="l">Storage</div><b>${s.disk}<small>GB</small></b><div class="s">${s.disk_info && s.disk_info.available ? s.disk_info.pct + "% used" : "SSD"}</div></div><div class="tile"><div class="l">Price</div><b>${num(s.price)}<small>BOLTs</small></b><div class="s">per 30 days</div></div></div>
+    <div class="sgrid"><div>
+      <div id="tslot"></div><div id="uslot"></div><div id="tools"></div>
+      ${diskCard(s.disk_info)}
+      ${r.jobs.length ? `<div class="card"><h3>Recent activity</h3><div class="tl" style="margin-top:8px">${r.jobs.slice(0, 8).map(j => `<div class="${esc(j.status)}"><i></i><span>${esc(j.action)}${j.status === "failed" ? ' <span class="sub">— ' + esc(j.result) + "</span>" : ""}</span><em>${esc(j.status)} • ${dt(j.created)}</em></div>`).join("")}</div></div>` : ""}
+    </div><div>
+      <div class="card"><h3>Connect</h3><div class="d">Log in as <b>root</b>. Your login screen shows these specs and the AxionHost banner.</div><div class="conn">
+        ${s.ssh ? crow("SSH", s.ssh, "cp") + crow("Host", nd.host || "-") + crow("Port", String(s.ssh_port || "-")) : (s.direct_ssh === false ? '<div class="sub">Direct SSH ports are not open on this node. Use the browser terminal, or start Pinggy / SSHX below.</div>' : "")}
+        ${crow("User", "root")}</div></div>
+      <div class="card"><h3>Billing</h3><div class="d">${num(s.price)} BOLTs every 30 days.</div><div class="exp ${daysLeft < 3 ? "low" : ""}"><i style="width:${pctLeft}%"></i></div><div class="row sp"><span class="sub">${dt(s.expires_at)}</span><b>${left(s.expires_at)}</b></div>
+        <div class="row sp" style="margin-top:14px"><button class="btn w sm" id="rn" ${busyNow ? "disabled" : ""}>Renew now (+30 days)</button><label class="row" style="gap:8px;font-size:13px;color:var(--mut)">Auto-renew <span class="sw"><input type="checkbox" id="ar" ${s.auto_renew ? "checked" : ""}><span></span></span></label></div></div>
+      <div class="card"><h3>Details</h3><dl class="kvl"><dt>Container</dt><dd><code>${esc(s.container)}</code></dd><dt>Image</dt><dd>${esc(s.image_key || "-")}</dd><dt>Type</dt><dd>${esc(s.type)}</dd><dt>Created</dt><dd>${dday(s.created_at)}</dd></dl></div>
+      <div class="card"><h3>Manage</h3><div class="d">Rename, reinstall or delete.</div><div class="row"><input class="i grow" id="rn2" value="${esc(s.name)}" maxlength="32"><button class="btn sm" id="rns">Save</button></div>
+        <div class="row" style="margin-top:12px"><button class="btn sm" id="re" ${busyNow || (s.suspended && !s.suspend_reason.startsWith("billing")) ? "disabled" : ""}>Reinstall</button><button class="btn sm red" id="del" ${busyNow ? "disabled" : ""}>Delete</button></div></div>
+    </div></div>`;
     $$("[data-a]").forEach(b => b.onclick = () => act(b.dataset.a));
-    $("#cp") && ($("#cp").onclick = () => { navigator.clipboard && navigator.clipboard.writeText(s.ssh).then(() => toast("Copied")); });
+    window.AXT && AXT.update(s, r.tools || {});
+    $$("[data-copy]").forEach(b => b.onclick = () => { navigator.clipboard && navigator.clipboard.writeText(b.dataset.copy).then(() => toast("Copied")); });
     $("#cr").onclick = creds; $("#rn").onclick = renew; $("#del").onclick = del; $("#re").onclick = reinstall;
     $("#ar").onchange = async e => { const x = await api("POST", `/api/servers/${sid}/autorenew`, { on: e.target.checked }); toast(x.ok ? "Auto-renew " + (e.target.checked ? "on" : "off") : x.error, !x.ok); };
     $("#rns").onclick = async () => { const x = await api("POST", `/api/servers/${sid}/rename`, { name: $("#rn2").value }); toast(x.ok ? "Saved" : x.error, !x.ok); if (x.ok) load(); };
