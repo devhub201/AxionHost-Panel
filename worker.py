@@ -46,7 +46,7 @@ __axion_banner() {
     printf ' \033[38;5;238m▒   ▒ ▒   ▒ ▒▒▒▒▒  ▒▒▒  ▒   ▒ ▒   ▒  ▒▒▒  ▒▒▒▒    ▒  \033[0m\n'
     printf ' \033[38;5;236m▒   ▒  ▒ ▒    ▒   ▒   ▒ ▒  ▒▒ ▒   ▒ ▒   ▒     ▒   ▒  \033[0m\n'
     printf ' \033[38;5;51m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\033[38;5;39m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\033[38;5;99m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\033[0m\n'
-    printf '         \033[2;3;38;5;159mP O W E R I N G   T H E   W O R L D\033[0m\n\n'
+    printf '           \033[2;3;38;5;159mPOWERING  NEXT-GEN  PERFORMANCE\033[0m\n\n'
     printf ' \033[38;5;39m┌─ \033[1;38;5;159mVPS SPECS\033[0;38;5;39m ──────────────────────────────────────┐\033[0m\n'
     __axion_row "Plan" "$AX_PLAN" "Node" "$AX_NODE"
     __axion_row "CPU" "$AX_CPU vCPU" "RAM" "$AX_RAM GB"
@@ -55,7 +55,7 @@ __axion_banner() {
     __axion_row "Memory" "$MU MB used" "Status" "ONLINE"
     printf ' \033[38;5;39m└───────────────────────────────────────────────────┘\033[0m\n\n'
   else
-    printf ' \033[1;38;5;51mA X I O N\033[38;5;99m H O S T\033[0m\n \033[2;3;38;5;159mPowering The World\033[0m\n\n'
+    printf ' \033[1;38;5;51mA X I O N\033[38;5;99m H O S T\033[0m\n \033[2;3;38;5;159mPowering Next-Gen Performance\033[0m\n\n'
     printf ' \033[2mPlan\033[0m   %s\n \033[2mSpecs\033[0m  %s vCPU • %s GB RAM • %s GB\n \033[2mOS\033[0m     %s\n \033[2mUp\033[0m     %s  •  load %s\n \033[2mMem\033[0m    %s MB used\n\n' "$AX_PLAN" "$AX_CPU" "$AX_RAM" "$AX_DISK" "$OSN" "$UP" "$LD" "$MU"
   fi
   unset C UP LD MU OSN

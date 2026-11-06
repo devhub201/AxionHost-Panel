@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>{% block title %}{{ site.site_name }}{% endblock %}</title>
 <meta name="csrf" content="{{ csrf }}"><meta name="theme-color" content="#000000">
-<link rel="icon" href="/static/logo.svg"><link rel="stylesheet" href="/static/panel.css">
+<link rel="icon" href="/static/logo.svg"><link rel="stylesheet" href="/static/panel.css"><link rel="stylesheet" href="/static/fx.css">
 </head><body data-page="{% block page %}{% endblock %}">
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
 <linearGradient id="lg1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#9a9aa2"/></linearGradient>
@@ -35,6 +35,6 @@
 <main><div class="wrap">{% block content %}{% endblock %}</div></main>
 {% endblock %}
 <div class="toasts" id="toasts"></div>
-<script src="/static/panel.js"></script>
+<script src="/static/panel.js"></script><script src="/static/fx.js"></script>
 {% block scripts %}{% endblock %}
 </body></html>
