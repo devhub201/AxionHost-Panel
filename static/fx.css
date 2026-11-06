@@ -54,3 +54,10 @@ body.fx-enter .card,body.fx-enter .tile,body.fx-enter .stat,body.fx-enter .srv,b
 .pill.running i{animation:pulse 1.8s infinite}
 .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok);animation:pulse 1.6s infinite}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.001s!important;animation-iteration-count:1!important;transition-duration:.001s!important;scroll-behavior:auto!important}#splash{display:none}}
+
+/* light theme: the whole UI is near-monochrome, so inverting + hue-rotating gives a faithful light mode; media and terminals are flipped back */
+html[data-theme=light]{filter:invert(1) hue-rotate(180deg);background:#000}
+html[data-theme=light] body{background:#000}
+html[data-theme=light] img,html[data-theme=light] video,html[data-theme=light] .xterm,html[data-theme=light] #splash,html[data-theme=light] #xt,html[data-theme=light] .tterm,html[data-theme=light] .avatar{filter:invert(1) hue-rotate(180deg)}
+html[data-theme=light] body:before{opacity:.5}
+#thm{width:36px;height:36px;border-radius:50%;border:1px solid var(--line2);background:transparent;color:var(--mut);cursor:pointer;display:grid;place-items:center;font-size:16px;transition:.2s}#thm:hover{color:#fff;background:rgba(255,255,255,.08);transform:rotate(20deg)}

@@ -1,7 +1,7 @@
 """AxionHost Panel Bot — manage the panel from Discord (slash commands, premium embeds, persistent buttons).
 Shares panel.db with the web app + worker. Invite tracking & booster rewards credit BOLTs automatically.
 Run:  python panel_bot.py   (systemd: axionhost-panelbot)"""
-import asyncio, logging, sys, time
+import asyncio, logging, random, sys, time
 import discord
 from discord import app_commands
 import core, ops
@@ -36,7 +36,7 @@ class PanelBot(discord.Client):
     def set_setting(self, k, v): self.db.execute("INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
 
     async def setup_hook(self):
-        self.add_view(MainPanelView(self))
+        self.add_view(MainPanelView(self)); self.add_view(GiveawayView(self))
         g = self.cfg.get("discord_guild_id")
         try:
             if g:
@@ -107,11 +107,25 @@ class PanelBot(discord.Client):
                     user = self.get_user(int(n["discord_id"])) or await self.fetch_user(int(n["discord_id"])); await user.send(embed=e)
             except (discord.Forbidden, discord.NotFound, discord.HTTPException, ValueError): pass
 
+    async def finish_giveaway_message(self, gid, won):
+        g = self.db.execute("SELECT * FROM giveaways WHERE id=?", (gid,)).fetchone()
+        if not g or not g["message_id"] or not g["channel_id"]: return
+        try:
+            ch = self.get_channel(int(g["channel_id"])) or await self.fetch_channel(int(g["channel_id"])); msg = await ch.fetch_message(int(g["message_id"]))
+            n = self.db.execute("SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id=?", (gid,)).fetchone()[0]
+            await msg.edit(embed=gw_embed(g, n, ["<@%s>" % u["discord_id"] for u in won]), view=None)
+            if won: await ch.send("🎉 Congratulations " + ", ".join("<@%s>" % u["discord_id"] for u in won) + "! You won **%d BOLTs**." % g["prize"])
+        except Exception: log.warning("could not update giveaway message", exc_info=True)
+
+    async def end_giveaways(self):
+        for g in self.db.execute("SELECT * FROM giveaways WHERE status='open' AND ends<=?", (now(),)).fetchall():
+            await self.finish_giveaway_message(g["id"], draw_giveaway(self.db, g["id"]))
+
     async def background(self):
         await self.wait_until_ready(); tick = 0
         while not self.is_closed():
             try:
-                await self.deliver()
+                await self.deliver(); await self.end_giveaways()
                 if tick % 120 == 0:
                     for g in self.guilds:
                         self.credit_invites(g)
@@ -144,6 +158,20 @@ class ServerView(discord.ui.View):
             b = discord.ui.Button(label=label, style=style); b.callback = self.mk(act); self.add_item(b)
         b = discord.ui.Button(label="Renew", style=discord.ButtonStyle.primary); b.callback = self.renew; self.add_item(b)
         b = discord.ui.Button(label="Credentials", style=discord.ButtonStyle.secondary); b.callback = self.creds; self.add_item(b)
+        b = discord.ui.Button(label="Reset password", style=discord.ButtonStyle.secondary, row=1); b.callback = self.mk("resetpw"); self.add_item(b)
+        b = discord.ui.Button(label="Snapshot", style=discord.ButtonStyle.secondary, row=1); b.callback = self.snap; self.add_item(b)
+        b = discord.ui.Button(label="Pinggy SSH", style=discord.ButtonStyle.secondary, row=1); b.callback = self.tool("pinggy"); self.add_item(b)
+        b = discord.ui.Button(label="SSHX", style=discord.ButtonStyle.secondary, row=1); b.callback = self.tool("sshx"); self.add_item(b)
+    async def snap(self, it):
+        try: ops.snapshot_create(self.bot.db, self.uid, self.sid, "", "discord")
+        except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+        await it.response.send_message(embed=good("Snapshot started", "You will get a DM when it is ready."), ephemeral=True)
+    def tool(self, kind):
+        async def cb(it):
+            try: ops.tool_action(self.bot.db, self.uid, self.sid, kind, "start", "discord")
+            except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+            await it.response.send_message(embed=good(kind.upper() + " starting", "Open the panel page of this server in ~20 seconds to get the link."), ephemeral=True)
+        return cb
     def mk(self, act):
         async def cb(it):
             try: ops.server_action(self.bot.db, self.uid, self.sid, act, ip="discord")
@@ -311,7 +339,8 @@ async def cmd_help(bot, it):
     await it.response.send_message(embed=emb("AxionHost commands", fields=[
         ("Account", "`/panel` `/profile` `/balance` `/daily` `/quests` `/redeem` `/invites` `/leaderboard`", False),
         ("Servers", "`/plans` `/deploy` `/servers` `/status` `/renew` `/start` `/stop` `/restart` `/ssh` `/resetpw` `/tool`", False),
-        ("Staff", "`/admin stats` `lookup` `bolts` `giveall` `nodes` `audit` `server` `ban` `unban` `maintenance` `announce` `promo` `plan`", False)]), ephemeral=True)
+        ("Support", "`/ticket new` `/ticket list` `/ticket close`", False),
+        ("Staff", "`/admin createvps` `stats` `lookup` `bolts` `giveall` `nodes` `audit` `tickets` `ticketreply` `ticketclose` `server` `ban` `unban` `maintenance` `announce` `promo` `plan` • `/giveaway start` `end`", False)]), ephemeral=True)
 
 async def adm_giveall(bot, it, amount, reason=""):
     me = staff(bot, it, "owner")
@@ -333,6 +362,121 @@ async def adm_audit(bot, it, count=10):
     if not staff(bot, it, "admin"): return await deny(it)
     rows = bot.db.execute("SELECT a.*,u.username FROM audit a LEFT JOIN users u ON u.id=a.actor ORDER BY a.id DESC LIMIT ?", (max(1, min(count, 25)),)).fetchall()
     await it.response.send_message(embed=emb("Audit log", "\n".join("%s **%s** `%s` %s" % (ts(r["created"]), r["username"] or r["actor"], r["action"], r["target"] or "") for r in rows) or "Empty."), ephemeral=True)
+
+async def adm_createvps(bot, it, member, plan, node="auto", os_="", name="", free=True):
+    me = staff(bot, it, "admin")
+    if not me: return await deny(it)
+    try:
+        r = ops.admin_deploy(bot.db, bot.cfg, me["id"], member.id, getattr(member, "name", "") or getattr(member, "display_name", ""), plan.strip().lower(), node, os_.strip().lower() or None, name, free, "discord")
+    except (ops.OpError, ValueError) as e: return await it.response.send_message(embed=bad(getattr(e, "msg", str(e))), ephemeral=True)
+    srv = bot.db.execute("SELECT * FROM servers WHERE id=?", (r["server_id"],)).fetchone()
+    nd = bot.db.execute("SELECT * FROM nodes WHERE id=?", (srv["node_id"],)).fetchone()
+    pw = core.dec(bot.cfg["secret_key"], srv["root_pw_enc"]) if srv["root_pw_enc"] else ""
+    fields = [("Server", "#%d • %s" % (srv["id"], srv["name"]), True), ("Plan", "%s — %s vCPU • %s GB • %s GB" % (srv["plan_name"], srv["cpu"], srv["ram"], srv["disk"]), False),
+              ("Location", ((nd["flag"] + " ") if nd["flag"] else "") + nd["name"], True), ("Root password", "||%s||" % pw, True),
+              ("SSH", "`ssh root@%s -p %s`" % (nd["host"] or "<node-ip>", srv["ssh_port"]) if nd["direct_ssh"] else "Use the in-browser terminal on the panel", False)]
+    if r["new"]:
+        fields = [("Panel login (e-mail)", "`%s`" % r["email"], False), ("Panel password", "||%s||" % r["password"], True)] + fields
+    desc = ("A server was created for you by staff. It is being set up now (1-3 minutes).\n" + ("**Your panel account was created.** Sign in at %s/login — or press *Continue with Discord* — and change the password in Settings." % bot.url() if r["new"] else "Open %s/dashboard to manage it." % bot.url()))
+    sent = True
+    try: await member.send(embed=emb("🎉 Your AxionHost server", desc, GREEN, fields))
+    except Exception: sent = False
+    note = ("%s now has a server (#%d)%s." % (member.mention if hasattr(member, "mention") else "User", srv["id"], " and a new panel account" if r["new"] else "")) + ("\n📩 Login details sent by DM." if sent else "\n⚠️ Could not DM them (DMs closed). Copy the details below and send them yourself.")
+    await it.response.send_message(embed=emb("Server created", note, GREEN, fields if not sent else (), footer=False), ephemeral=True)
+
+# ---------------- tickets ----------------
+async def cmd_ticket_new(bot, it, subject, message):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    try: tid = ops.ticket_open(bot.db, u["id"], subject, message, None, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Ticket #%d opened" % tid, "We will reply here by DM. You can also follow it at %s/support" % bot.url()), ephemeral=True)
+
+async def cmd_ticket_list(bot, it):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    rows = bot.db.execute("SELECT * FROM tickets WHERE user_id=? ORDER BY updated DESC LIMIT 10", (u["id"],)).fetchall()
+    await it.response.send_message(embed=emb("Your tickets", "\n".join("`#%d` **%s** — %s (%s)" % (r["id"], r["subject"], r["status"], ts(r["updated"])) for r in rows) or "No tickets."), ephemeral=True)
+
+async def cmd_ticket_close(bot, it, ticket_id):
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    try: ops.ticket_close(bot.db, u["id"], ticket_id, False, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Ticket #%d closed" % ticket_id), ephemeral=True)
+
+async def adm_tickets(bot, it):
+    if not staff(bot, it, "support"): return await deny(it)
+    rows = bot.db.execute("SELECT t.*,u.username FROM tickets t LEFT JOIN users u ON u.id=t.user_id WHERE t.status!='closed' ORDER BY t.updated DESC LIMIT 15").fetchall()
+    await it.response.send_message(embed=emb("Open tickets", "\n".join("`#%d` **%s** — %s • %s (%s)" % (r["id"], r["subject"], r["username"], r["status"], ts(r["updated"])) for r in rows) or "No open tickets 🎉"), ephemeral=True)
+
+async def adm_ticketreply(bot, it, ticket_id, message):
+    me = staff(bot, it, "support")
+    if not me: return await deny(it)
+    try: ops.ticket_reply(bot.db, me["id"], ticket_id, message, True, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Reply sent", "The user was notified by DM."), ephemeral=True)
+
+async def adm_ticketclose(bot, it, ticket_id):
+    me = staff(bot, it, "support")
+    if not me: return await deny(it)
+    try: ops.ticket_close(bot.db, me["id"], ticket_id, True, "discord")
+    except ops.OpError as e: return await it.response.send_message(embed=bad(e.msg), ephemeral=True)
+    await it.response.send_message(embed=good("Ticket #%d closed" % ticket_id), ephemeral=True)
+
+# ---------------- giveaways ----------------
+def gw_embed(g, entries=0, winners=None):
+    done = g["status"] != "open"
+    fields = [("Prize", "%d BOLTs each" % g["prize"], True), ("Winners", str(g["winners"]), True), ("Entries", str(entries), True)]
+    if done: return emb("🎉 " + (g["title"] or "Giveaway") + " — ended", ("Winners: " + ", ".join(winners)) if winners else "Nobody entered.", GREEN, fields)
+    return emb("🎁 " + (g["title"] or "BOLTs giveaway"), "Press **Enter** to join. You need a panel account (sign in with Discord once).\nEnds %s." % ("<t:%d:R>" % g["ends"]), WHITE, fields)
+
+async def cmd_gw_start(bot, it, prize, winners=1, hours=24.0, title=""):
+    me = staff(bot, it, "admin")
+    if not me: return await deny(it)
+    if not 1 <= prize <= 100000 or not 1 <= winners <= 20 or not 0.05 <= hours <= 336: return await it.response.send_message(embed=bad("Prize 1-100000, winners 1-20, duration 0.05-336 hours."), ephemeral=True)
+    t = now(); gid = bot.db.execute("INSERT INTO giveaways(channel_id,prize,winners,title,host_id,ends,created) VALUES(?,?,?,?,?,?,?)", (str(getattr(getattr(it, "channel", None), "id", "") or ""), prize, winners, (title or "")[:60], me["id"], int(t + hours * 3600), t)).lastrowid
+    g = bot.db.execute("SELECT * FROM giveaways WHERE id=?", (gid,)).fetchone()
+    await it.response.send_message(embed=gw_embed(g), view=GiveawayView(bot))
+    try:
+        m = await it.original_response(); bot.db.execute("UPDATE giveaways SET message_id=? WHERE id=?", (str(m.id), gid))
+    except Exception: log.warning("could not read giveaway message id", exc_info=True)
+    audit(bot.db, me["id"], "giveaway.start", gid, "%d x%d" % (prize, winners), "discord")
+
+async def gw_enter(bot, it):
+    g = bot.db.execute("SELECT * FROM giveaways WHERE message_id=?", (str(getattr(getattr(it, "message", None), "id", "")),)).fetchone()
+    if not g or g["status"] != "open" or g["ends"] <= now(): return await it.response.send_message(embed=bad("This giveaway has ended."), ephemeral=True)
+    u = bot.user(it.user.id)
+    if not u: return await need_account(bot, it)
+    if u["banned"]: return await it.response.send_message(embed=bad("Your account is banned."), ephemeral=True)
+    cur = bot.db.execute("INSERT OR IGNORE INTO giveaway_entries(giveaway_id,discord_id) VALUES(?,?)", (g["id"], str(it.user.id)))
+    n = bot.db.execute("SELECT COUNT(*) FROM giveaway_entries WHERE giveaway_id=?", (g["id"],)).fetchone()[0]
+    await it.response.send_message(embed=good("You're in!" if cur.rowcount else "Already entered", "%d entries so far. Good luck!" % n), ephemeral=True)
+
+def draw_giveaway(db, gid):
+    """Pick winners among entrants that have an active panel account, pay them, mark the giveaway ended. Returns [(user_row)]."""
+    g = db.execute("SELECT * FROM giveaways WHERE id=?", (gid,)).fetchone()
+    if not g or g["status"] != "open": return []
+    pool = [r for r in (db.execute("SELECT u.* FROM giveaway_entries e JOIN users u ON u.discord_id=e.discord_id WHERE e.giveaway_id=? AND u.banned=0", (gid,)).fetchall())]
+    won = random.sample(pool, min(g["winners"], len(pool)))
+    with tx(db):
+        for u in won:
+            add_bolts(db, u["id"], g["prize"], "Giveaway win: " + (g["title"] or "#%d" % gid), "gw:%d" % gid)
+            ops.notify(db, u["id"], "🎉 You won a giveaway!", "**+%d BOLTs** were added to your balance." % g["prize"], "giveaway")
+        db.execute("UPDATE giveaways SET status='ended',result=? WHERE id=?", (",".join(str(u["id"]) for u in won), gid))
+    return won
+
+async def adm_gw_end(bot, it, giveaway_id):
+    me = staff(bot, it, "admin")
+    if not me: return await deny(it)
+    won = draw_giveaway(bot.db, giveaway_id)
+    await bot.finish_giveaway_message(giveaway_id, won)
+    await it.response.send_message(embed=good("Giveaway ended", "%d winner(s) paid." % len(won)), ephemeral=True)
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, bot):
+        super().__init__(timeout=None); self.bot = bot
+        b = discord.ui.Button(label="Enter", emoji="🎁", style=discord.ButtonStyle.success, custom_id="axp:gw:enter"); b.callback = lambda it: gw_enter(bot, it); self.add_item(b)
 
 def register(bot):
     t = bot.tree
@@ -405,6 +549,22 @@ def register(bot):
     async def tool(it, server_id: int, kind: app_commands.Choice[str]): await cmd_tool(bot, it, server_id, kind.value)
     @t.command(name="help", description="List all commands")
     async def help_(it): await cmd_help(bot, it)
+
+    tk = app_commands.Group(name="ticket", description="Support tickets")
+    @tk.command(name="new", description="Open a support ticket")
+    async def tk_new(it, subject: str, message: str): await cmd_ticket_new(bot, it, subject, message)
+    @tk.command(name="list", description="Your tickets")
+    async def tk_list(it): await cmd_ticket_list(bot, it)
+    @tk.command(name="close", description="Close one of your tickets")
+    async def tk_close(it, ticket_id: int): await cmd_ticket_close(bot, it, ticket_id)
+    t.add_command(tk)
+
+    gw = app_commands.Group(name="giveaway", description="BOLTs giveaways (staff)")
+    @gw.command(name="start", description="Start a giveaway in this channel")
+    async def gw_start(it, prize: int, winners: int = 1, hours: float = 24.0, title: str = ""): await cmd_gw_start(bot, it, prize, winners, hours, title)
+    @gw.command(name="end", description="End a giveaway now and draw winners")
+    async def gw_end(it, giveaway_id: int): await adm_gw_end(bot, it, giveaway_id)
+    t.add_command(gw)
 
     # ---- staff ----
     adm = app_commands.Group(name="admin", description="AxionHost staff tools")
@@ -518,6 +678,17 @@ def register(bot):
     async def a_nodes(it): await adm_nodes(bot, it)
     @adm.command(name="audit", description="Recent audit log entries")
     async def a_audit(it, count: int = 10): await adm_audit(bot, it, count)
+
+    @adm.command(name="createvps", description="Create a server for a Discord user (makes their panel account + DMs login if needed)")
+    @app_commands.describe(member="Discord user", plan="Plan key, e.g. nano", node="Node id or 'auto'", os="OS image key (default first)", name="Server name", free="Staff pays the BOLTs (default yes)")
+    async def a_createvps(it, member: discord.User, plan: str, node: str = "auto", os: str = "", name: str = "", free: bool = True): await adm_createvps(bot, it, member, plan, node, os, name, free)
+
+    @adm.command(name="tickets", description="Open support tickets")
+    async def a_tickets(it): await adm_tickets(bot, it)
+    @adm.command(name="ticketreply", description="Reply to a ticket (DMs the user)")
+    async def a_tkreply(it, ticket_id: int, message: str): await adm_ticketreply(bot, it, ticket_id, message)
+    @adm.command(name="ticketclose", description="Close a ticket")
+    async def a_tkclose(it, ticket_id: int): await adm_ticketclose(bot, it, ticket_id)
 
     t.add_command(adm)
 

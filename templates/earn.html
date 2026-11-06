@@ -6,6 +6,7 @@
   <div class="card"><h3>Invite friends</h3><div class="d">Each friend who joins our Discord and stays {{ site.invite_min_age_days }} days pays <b>{{ site.bolts_per_invite }} BOLTs</b>. Link Discord first, then use <code>/invites</code> in the server.</div>
     <div class="row">{% if site.discord_invite %}<a class="btn" href="{{ site.discord_invite }}" target="_blank" rel="noopener">Join our Discord</a>{% endif %}<span class="pill">Server boosters get +{{ site.booster_bonus }}</span></div></div>
 </div>
+<div class="card" id="refcard" style="margin-bottom:16px"><h3>Refer a friend</h3><div class="d" id="refd">Share your link. They get a welcome bonus, you get BOLTs when they launch their first server.</div><div class="crow" style="margin-top:10px;display:flex"><code id="reflink" style="flex:1;overflow-x:auto;white-space:nowrap"></code><button class="btn sm" id="refcp">Copy</button></div><div class="row" style="gap:18px;margin-top:10px;font-size:13px;color:var(--mut)" id="refst"></div></div>
 <div class="grid g2">
   <div class="card"><h3>Quests</h3><div class="d">One-time tasks, instant BOLTs.</div><div id="quests" class="grid"><div class="sk"></div></div></div>
   <div class="card"><h3>Redeem promo code</h3><div class="d">Have a code? Discord must be linked.</div>

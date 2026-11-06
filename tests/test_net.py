@@ -37,7 +37,7 @@ import re; csrf = re.search(r'name="csrf" content="([^"]+)"', c.get("/dashboard"
 post = lambda u, d: c.post(u, json=d, headers={"X-CSRF-Token": csrf, "Origin": "http://localhost"}, base_url="http://localhost")
 ck("bad listen rejected", post("/api/admin/nodes", dict(name="x", listen="0.0.0.0;id")).status_code == 400)
 ck("ipv6 listen accepted", post("/api/admin/nodes", dict(name="x6", listen="[::]", host="2001:db8::5")).status_code == 200)
-nd = c.get("/api/catalog", base_url="http://localhost").get_json()["nodes"]; ck("catalog lists nodes", len(nd) == 3)
+nd = c.get("/api/catalog", base_url="http://localhost").get_json()["nodes"]; ck("catalog lists nodes + auto option", len([x for x in nd if x["id"] != "auto"]) == 3 and nd[0]["id"] == "auto"); nd = [x for x in nd if x["id"] != "auto"]
 # SSH string for IPv6 host
 db.execute("UPDATE nodes SET host='2001:db8::5' WHERE id=1"); s = c.get("/api/servers/1", base_url="http://localhost").get_json()["server"]
 ck("ssh cmd with ipv6 host", s["ssh"] == "ssh root@2001:db8::5 -p 20001", s["ssh"])

@@ -111,6 +111,8 @@ def create_app(cfg=None, http=None):
             uid = cur.lastrowid
             if geti(s, "signup_bonus") > 0: add_bolts(db, uid, geti(s, "signup_bonus"), "Welcome bonus", earned=True)
             audit(db, uid, "user.register", uid, ",".join(x for x in ("email" if email else "", "discord" if discord else "", "google" if google else "") if x), ip())
+        try: ops.referral_apply(db, uid, request.cookies.get("axref"))
+        except Exception: pass
         return uid
 
     def clean_name(n):
@@ -350,6 +352,39 @@ def create_app(cfg=None, http=None):
         return ok(rows=rows)
 
     # ---------------- catalog + servers ----------------
+    @app.get("/r/<code>")
+    def ref_landing(code):
+        resp = make_response(redirect("/login?mode=register"))
+        if re.match(r"^[0-9a-f]{8}$", code): resp.set_cookie("axref", code, max_age=30 * 86400, httponly=True, samesite="Lax", secure=request.is_secure)
+        return resp
+
+    def status_data():
+        t = now(); out = []
+        for n in db.execute("SELECT * FROM nodes WHERE enabled=1 ORDER BY id"):
+            rows = db.execute("SELECT t,up FROM status_hist WHERE node_id=? AND t>=?", (n["id"], t - 30 * 86400)).fetchall()
+            def pct(sec):
+                r = [x["up"] for x in rows if x["t"] >= t - sec]; return round(sum(r) * 100.0 / len(r), 2) if r else None
+            bars = []
+            for i in range(48):                                    # last 24h in 30-min buckets, oldest first
+                lo = t - 86400 + i * 1800; r = [x["up"] for x in rows if lo <= x["t"] < lo + 1800]
+                bars.append(None if not r else round(sum(r) / len(r), 2))
+            out.append(dict(name=n["name"], location=n["location"], flag=n["flag"], up=n["health"] != "offline", health=n["health"] or "unknown", day=pct(86400), month=pct(30 * 86400), bars=bars,
+                            servers=db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0 AND status='running'", (n["id"],)).fetchone()[0]))
+        return dict(nodes=out, all_up=all(x["up"] for x in out) if out else True, running=sum(x["servers"] for x in out), at=t)
+
+    @app.get("/status")
+    def status_page(): return page("status.html")
+
+    @app.get("/api/status")
+    def status_api():
+        resp = jsonify(ok=True, **status_data()); resp.headers["Cache-Control"] = "public, max-age=30"; return resp
+
+    @app.get("/api/referral")
+    @api()
+    def referral_info():
+        st = ops.referral_stats(db, current()["id"]); s = S()
+        return ok(link=cfg["base_url"].rstrip("/") + "/r/" + st["code"], new_bonus=geti(s, "referral_new"), reward=geti(s, "referral_reward"), joined=st["joined"], paid=st["paid"], earned=st["earned"])
+
     @app.get("/api/catalog")
     @api()
     def catalog():
@@ -360,11 +395,13 @@ def create_app(cfg=None, http=None):
             if d["stock"] >= 0:
                 used = db.execute("SELECT COUNT(*) FROM servers WHERE plan_key=? AND deleted=0", (p["key"],)).fetchone()[0]
                 d["left"] = max(0, d["stock"] - used)
+            d["price"] = core.plan_price(p); d["sale_pct"] = core.sale_active(p); d["sale_until"] = p["sale_until"] if d["sale_pct"] else 0
             plans.append(d)
         nodes = []
         for n in db.execute("SELECT * FROM nodes WHERE enabled=1"):
             c = db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0]
             nodes.append(dict(id=n["id"], name=n["name"], location=n["location"], flag=n["flag"], full=c >= n["max_servers"] or n["health"] == "offline", offline=n["health"] == "offline", load=c, cap=n["max_servers"]))
+        if len(nodes) > 1: nodes.insert(0, dict(id="auto", name="Auto (best)", location="We pick the least loaded", flag="✨", full=all(x["full"] for x in nodes), offline=False, load=0, cap=0))
         imgs = [dict(key=i["key"], label=i["label"]) for i in db.execute("SELECT * FROM images WHERE enabled=1 ORDER BY sort")]
         return ok(plans=plans, nodes=nodes, images=imgs, bolts=current()["bolts"], bpi=geti(S(), "bolts_per_invite"))
 
@@ -388,6 +425,51 @@ def create_app(cfg=None, http=None):
 
 
     # ---------------- helper tools + in-browser terminal ----------------
+    @app.get("/api/servers/<int:sid>/extras")
+    @api(rate=(60, 60))
+    def server_extras(sid):
+        r = own(sid)
+        if not r: return err("Server not found", 404)
+        n = db.execute("SELECT host,flag,name FROM nodes WHERE id=?", (r["node_id"],)).fetchone(); s = S()
+        return ok(host=(n and n["host"]) or "", snapshots=[dict(id=x["id"], name=x["name"], status=x["status"], size=x["size"], created=x["created"], note=x["note"]) for x in db.execute("SELECT * FROM snapshots WHERE server_id=? ORDER BY id DESC", (sid,))],
+                  ports=[dict(id=x["id"], public=x["public_port"], target=x["target_port"], proto=x["proto"], status=x["status"]) for x in db.execute("SELECT * FROM port_forwards WHERE server_id=? ORDER BY id", (sid,))],
+                  limits=dict(snapshots=geti(s, "snapshots_per_server"), ports=geti(s, "ports_per_server")))
+
+    @app.post("/api/servers/<int:sid>/snapshots")
+    @api(rate=(10, 300))
+    def snap_new(sid): return run(lambda: dict(id=ops.snapshot_create(db, current()["id"], sid, str(body().get("name") or ""), ip())))
+
+    @app.post("/api/servers/<int:sid>/snapshots/<int:snid>/restore")
+    @api(rate=(6, 300))
+    def snap_restore(sid, snid): return run(lambda: ops.snapshot_restore(db, current()["id"], sid, snid, ip()) and None)
+
+    @app.post("/api/servers/<int:sid>/snapshots/<int:snid>/delete")
+    @api(rate=(20, 300))
+    def snap_del(sid, snid): return run(lambda: ops.snapshot_delete(db, current()["id"], sid, snid, ip()) and None)
+
+    @app.post("/api/servers/<int:sid>/ports")
+    @api(rate=(20, 300))
+    def port_new(sid):
+        d = body(); return run(lambda: ops.port_add(db, current()["id"], sid, d.get("port"), str(d.get("proto") or "tcp"), ip()))
+
+    @app.post("/api/servers/<int:sid>/ports/<int:fid>/delete")
+    @api(rate=(30, 300))
+    def port_del(sid, fid): return run(lambda: ops.port_remove(db, current()["id"], sid, fid, ip()) and None)
+
+    @app.get("/api/servers/<int:sid>/stats")
+    @api(rate=(60, 60))
+    def server_stats(sid):
+        r = own(sid)
+        if not r: return err("Server not found", 404)
+        mins = max(10, min(geti(request.args, "m") or 60, 1440)); t0 = now() - mins * 60
+        rows = db.execute("SELECT t,cpu,mem FROM stat_hist WHERE server_id=? AND t>=? ORDER BY t", (sid, t0)).fetchall()
+        step = max(1, len(rows) // 120 + (1 if len(rows) % 120 else 0)) if len(rows) > 120 else 1
+        pts = []
+        for i in range(0, len(rows), step):
+            ch = rows[i:i + step]; cp = [x["cpu"] for x in ch if x["cpu"] is not None]; mm = [x["mem"] for x in ch if x["mem"] is not None]
+            pts.append(dict(t=ch[0]["t"], cpu=round(sum(cp) / len(cp), 1) if cp else None, mem=int(sum(mm) / len(mm)) if mm else None))
+        return ok(points=pts, ram=int(r["ram"]) * 1073741824, minutes=mins)
+
     @app.post("/api/servers/<int:sid>/tools")
     @api(rate=(20, 60))
     def server_tool(sid):
@@ -528,6 +610,57 @@ def create_app(cfg=None, http=None):
                   nodes=[dict(id=n["id"], name=n["name"], flag=n["flag"], transport=n["transport"], health=n["health"], cpu=n["cpu_total"], ram=n["ram_total"], disk=n["disk_total"], free=n["disk_free"], load=n["load1"],
                            servers=db.execute("SELECT COUNT(*) FROM servers WHERE node_id=? AND deleted=0", (n["id"],)).fetchone()[0], cap=n["max_servers"], on=n["enabled"]) for n in db.execute("SELECT * FROM nodes ORDER BY id")])
 
+    # ---- support tickets (users) ----
+    @app.get("/support")
+    def support_page(): return page("support.html", need="user", key="support")
+
+    def tk_dict(t): return dict(id=t["id"], subject=t["subject"], status=t["status"], created=t["created"], updated=t["updated"], user=t["username"] if "username" in t.keys() else None, server_id=t["server_id"])
+
+    @app.get("/api/tickets")
+    @api()
+    def tickets_mine(): return ok(tickets=[tk_dict(t) for t in db.execute("SELECT * FROM tickets WHERE user_id=? ORDER BY updated DESC LIMIT 100", (current()["id"],))])
+
+    @app.post("/api/tickets")
+    @api(rate=(5, 600))
+    def ticket_new():
+        d = body(); return run(lambda: dict(id=ops.ticket_open(db, current()["id"], d.get("subject"), d.get("body"), geti(d, "server_id") or None, ip())))
+
+    @app.get("/api/tickets/<int:tid>")
+    @api()
+    def ticket_get(tid):
+        t = db.execute("SELECT * FROM tickets WHERE id=? AND user_id=?", (tid, current()["id"])).fetchone()
+        return ok(ticket=tk_dict(t), messages=ops.ticket_thread(db, tid)) if t else err("Ticket not found", 404)
+
+    @app.post("/api/tickets/<int:tid>/reply")
+    @api(rate=(20, 300))
+    def ticket_reply_(tid): return run(lambda: ops.ticket_reply(db, current()["id"], tid, body().get("body"), False, ip()) and None)
+
+    @app.post("/api/tickets/<int:tid>/close")
+    @api(rate=(20, 300))
+    def ticket_close_(tid): return run(lambda: ops.ticket_close(db, current()["id"], tid, False, ip()) and None)
+
+    # ---- tickets (staff) ----
+    @app.get("/api/admin/tickets")
+    @A("support")
+    def a_tickets():
+        st = request.args.get("status", "open")
+        q = "SELECT t.*,u.username FROM tickets t LEFT JOIN users u ON u.id=t.user_id" + ("" if st == "all" else " WHERE t.status!='closed'" if st == "open" else " WHERE t.status=?") + " ORDER BY t.updated DESC LIMIT 200"
+        return ok(tickets=[tk_dict(t) for t in db.execute(q, (st,) if st not in ("all", "open") else ())])
+
+    @app.get("/api/admin/tickets/<int:tid>")
+    @A("support")
+    def a_ticket_get(tid):
+        t = db.execute("SELECT t.*,u.username FROM tickets t LEFT JOIN users u ON u.id=t.user_id WHERE t.id=?", (tid,)).fetchone()
+        return ok(ticket=tk_dict(t), messages=ops.ticket_thread(db, tid)) if t else err("Ticket not found", 404)
+
+    @app.post("/api/admin/tickets/<int:tid>/reply")
+    @A("support", rate=(60, 300))
+    def a_ticket_reply(tid): return run(lambda: ops.ticket_reply(db, current()["id"], tid, body().get("body"), True, ip()) and None)
+
+    @app.post("/api/admin/tickets/<int:tid>/close")
+    @A("support", rate=(60, 300))
+    def a_ticket_close(tid): return run(lambda: ops.ticket_close(db, current()["id"], tid, True, ip()) and None)
+
     @app.post("/api/admin/giveall")
     @A("owner", rate=(12, 300))
     def a_giveall():
@@ -545,6 +678,19 @@ def create_app(cfg=None, http=None):
         except (RuntimeError, OSError) as e: return err(str(e) or "Could not open a terminal", 503)
         audit(db, current()["id"], "server.admin_console", sid, "owner=%s" % r["user_id"], ip())
         return ok(tid=tid)
+
+    @app.post("/api/admin/sale")
+    @A("admin", rate=(10, 300))
+    def a_sale():
+        d = body()
+        try: pct = int(d.get("pct")); hrs = float(d.get("hours") or 0)
+        except (TypeError, ValueError): return err("Enter a percent and a duration")
+        if not 0 <= pct <= 90: return err("Discount must be 0-90%")
+        key = str(d.get("plan") or "all"); until = int(now() + hrs * 3600) if pct and hrs > 0 else 0
+        with tx(db):
+            n = db.execute("UPDATE plans SET sale_pct=?,sale_until=? WHERE enabled=1" + ("" if key == "all" else " AND key=?"), (pct, until) + (() if key == "all" else (key,))).rowcount
+            audit(db, current()["id"], "plans.sale", key, "%d%% for %sh" % (pct, hrs), ip())
+        return ok(plans=n, until=until)
 
     @app.get("/api/admin/users")
     @A("support")
@@ -638,7 +784,7 @@ def create_app(cfg=None, http=None):
     def remote(v):
         if not REMOTE_RE.match(str(v)): raise ValueError("Invalid remote")
         return str(v)
-    crud("plans", "key", dict(key=slug, name=txt(40), bolts=nz, invites=pos, cpu=nz, ram=nz, disk=nz, type=oneof("container", "vm"), blurb=txt(140), stock=int, enabled=b01, sort=int), "plans")
+    crud("plans", "key", dict(key=slug, name=txt(40), bolts=nz, invites=pos, cpu=nz, ram=nz, disk=nz, type=oneof("container", "vm"), blurb=txt(140), stock=int, enabled=b01, sort=int, sale_pct=lambda v: max(0, min(90, int(v))), sale_until=lambda v: max(0, int(v))), "plans")
     # ---- nodes: local machine, or any SSH server (VPS / home server / Pinggy tunnel) with a password ----
     NODE_PUB = ("id", "name", "location", "flag", "host", "lxc_remote", "max_servers", "enabled", "listen", "transport", "ssh_host", "ssh_port", "ssh_user", "direct_ssh",
                 "cpu_total", "ram_total", "disk_total", "disk_free", "load1", "health", "health_note", "seen_at")

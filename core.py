@@ -18,7 +18,7 @@ DEFAULT_CONFIG = {
 DEFAULT_SETTINGS = {
     "site_name": "AxionHost", "discord_invite": "", "announcement": "",
     "maintenance": "0", "registration_open": "1", "email_signup": "1",
-    "bolts_per_invite": "200", "daily_bolts": "50", "booster_bonus": "500",
+    "bolts_per_invite": "200", "referral_new": "25", "referral_reward": "100", "referral_max": "50", "snapshots_per_server": "2", "ports_per_server": "3", "port_range": "30000-39999", "abuse_cpu_pct": "95", "abuse_minutes": "20", "abuse_action": "alert", "node_disk_alert_pct": "10", "node_load_factor": "1.5", "daily_bolts": "50", "booster_bonus": "500",
     "signup_bonus": "0", "max_servers_per_user": "3", "grace_days": "3",
     "delete_after_days": "7", "billing_days": "30", "refund_on_fail": "1",
     "min_password": "8", "invite_min_age_days": "3", "maintenance_pages": "", "maintenance_msg": "",
@@ -61,7 +61,7 @@ CREATE TABLE IF NOT EXISTS ledger(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id 
 CREATE INDEX IF NOT EXISTS ix_ledger_user ON ledger(user_id, id);
 CREATE TABLE IF NOT EXISTS plans(key TEXT PRIMARY KEY, name TEXT NOT NULL, bolts INTEGER NOT NULL, invites INTEGER NOT NULL DEFAULT 0,
   cpu INTEGER NOT NULL, ram INTEGER NOT NULL, disk INTEGER NOT NULL, type TEXT NOT NULL DEFAULT 'container',
-  blurb TEXT DEFAULT '', stock INTEGER NOT NULL DEFAULT -1, enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0);
+  blurb TEXT DEFAULT '', stock INTEGER NOT NULL DEFAULT -1, enabled INTEGER NOT NULL DEFAULT 1, sort INTEGER NOT NULL DEFAULT 0, sale_pct INTEGER NOT NULL DEFAULT 0, sale_until INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS nodes(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, location TEXT DEFAULT '', flag TEXT DEFAULT '',
   host TEXT DEFAULT '', lxc_remote TEXT DEFAULT '', max_servers INTEGER NOT NULL DEFAULT 50, enabled INTEGER NOT NULL DEFAULT 1, listen TEXT NOT NULL DEFAULT '0.0.0.0',
   transport TEXT NOT NULL DEFAULT 'local', ssh_host TEXT DEFAULT '', ssh_port INTEGER DEFAULT 22, ssh_user TEXT DEFAULT 'root', ssh_pass_enc TEXT DEFAULT '', direct_ssh INTEGER NOT NULL DEFAULT 1,
@@ -85,6 +85,15 @@ CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS server_tools(server_id INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'stopped', url TEXT DEFAULT '', note TEXT DEFAULT '', updated INTEGER DEFAULT 0, PRIMARY KEY(server_id,kind));
 CREATE TABLE IF NOT EXISTS notify(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, discord_id TEXT, title TEXT NOT NULL, body TEXT DEFAULT '', kind TEXT DEFAULT 'info',
   created INTEGER NOT NULL, sent INTEGER NOT NULL DEFAULT 0, to_log INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS snapshots(id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, name TEXT NOT NULL, ref TEXT DEFAULT '', size INTEGER, status TEXT NOT NULL DEFAULT 'creating', note TEXT DEFAULT '', created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS port_forwards(id INTEGER PRIMARY KEY AUTOINCREMENT, server_id INTEGER NOT NULL, public_port INTEGER NOT NULL UNIQUE, target_port INTEGER NOT NULL, proto TEXT NOT NULL DEFAULT 'tcp', status TEXT NOT NULL DEFAULT 'active', created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS status_hist(node_id INTEGER NOT NULL, t INTEGER NOT NULL, up INTEGER NOT NULL, PRIMARY KEY(node_id,t));
+CREATE TABLE IF NOT EXISTS tickets(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, subject TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', server_id INTEGER, created INTEGER NOT NULL, updated INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS ticket_msgs(id INTEGER PRIMARY KEY AUTOINCREMENT, ticket_id INTEGER NOT NULL, user_id INTEGER NOT NULL, staff INTEGER NOT NULL DEFAULT 0, body TEXT NOT NULL, created INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_tmsg ON ticket_msgs(ticket_id, id);
+CREATE TABLE IF NOT EXISTS giveaways(id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, message_id TEXT, prize INTEGER NOT NULL, winners INTEGER NOT NULL DEFAULT 1, title TEXT DEFAULT '', host_id INTEGER, ends INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open', result TEXT DEFAULT '', created INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS giveaway_entries(giveaway_id INTEGER NOT NULL, discord_id TEXT NOT NULL, PRIMARY KEY(giveaway_id, discord_id));
+CREATE TABLE IF NOT EXISTS stat_hist(server_id INTEGER NOT NULL, t INTEGER NOT NULL, cpu REAL, mem INTEGER, PRIMARY KEY(server_id,t));
 CREATE TABLE IF NOT EXISTS invite_credits(invitee_id TEXT PRIMARY KEY, inviter_id TEXT NOT NULL, joined INTEGER NOT NULL, credited INTEGER NOT NULL DEFAULT 0);
 """
 SEED_IMAGES = [("ubuntu-22", "Ubuntu 22.04 LTS", "ubuntu:22.04"), ("ubuntu-24", "Ubuntu 24.04 LTS", "ubuntu:24.04"),
@@ -130,7 +139,9 @@ def init_db(db):
     for tbl, add in (("nodes", (("listen", "TEXT NOT NULL DEFAULT '0.0.0.0'"), ("transport", "TEXT NOT NULL DEFAULT 'local'"), ("ssh_host", "TEXT DEFAULT ''"), ("ssh_port", "INTEGER DEFAULT 22"),
                                   ("ssh_user", "TEXT DEFAULT 'root'"), ("ssh_pass_enc", "TEXT DEFAULT ''"), ("direct_ssh", "INTEGER NOT NULL DEFAULT 1"), ("cpu_total", "INTEGER"), ("ram_total", "INTEGER"),
                                   ("disk_total", "INTEGER"), ("disk_free", "INTEGER"), ("load1", "REAL"), ("health", "TEXT NOT NULL DEFAULT 'unknown'"), ("health_note", "TEXT DEFAULT ''"), ("seen_at", "INTEGER DEFAULT 0"))),
-                     ("servers", (("cpu_pct", "REAL"), ("mem_used", "INTEGER"), ("stat_at", "INTEGER")))):
+                     ("servers", (("cpu_pct", "REAL"), ("mem_used", "INTEGER"), ("stat_at", "INTEGER"), ("abuse_streak", "INTEGER NOT NULL DEFAULT 0"), ("abuse_flag", "INTEGER NOT NULL DEFAULT 0"))),
+                     ("users", (("ref_code", "TEXT"), ("referred_by", "INTEGER"), ("ref_paid", "INTEGER NOT NULL DEFAULT 0"))),
+                     ("nodes", (("alert_state", "TEXT NOT NULL DEFAULT ''"),))):
         have = {r[1] for r in db.execute("PRAGMA table_info(%s)" % tbl)}
         for col, typ in add:
             if col not in have: db.execute("ALTER TABLE %s ADD COLUMN %s %s" % (tbl, col, typ))
@@ -231,13 +242,21 @@ def alloc_ssh_port(db, cfg):
         if p not in used: return p
     raise RuntimeError("No free SSH ports")
 
+def sale_active(plan, t=None):
+    t = t or now(); p = int(plan["sale_pct"] or 0) if "sale_pct" in plan.keys() else 0
+    return p if 0 < p <= 90 and (not plan["sale_until"] or t < plan["sale_until"]) else 0
+
+def plan_price(plan, t=None):
+    """What a new deploy costs right now (sale applied). Renewals always bill the regular server price."""
+    p = sale_active(plan, t); return max(1, int(round(int(plan["bolts"]) * (100 - p) / 100.0))) if p else int(plan["bolts"])
+
 def create_server_row(db, cfg, user, plan, node, image, name):
     """Debit + insert server + queue deploy job. Run inside tx()."""
     s = get_settings(db)
     cname = "axp-%d-%s" % (user["id"], secrets.token_hex(3))
     t = now()
     pw = gen_password()
-    add_bolts(db, user["id"], -plan["bolts"], "Deploy " + plan["name"], cname)
+    add_bolts(db, user["id"], -plan_price(plan), "Deploy " + plan["name"] + (" (sale -%d%%)" % sale_active(plan) if sale_active(plan) else ""), cname)
     cur = db.execute("""INSERT INTO servers(user_id,plan_key,plan_name,node_id,name,container,image_key,lxc_image,type,cpu,ram,disk,price,status,ssh_port,root_pw_enc,created_at,expires_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'provisioning',?,?,?,?)""",
         (user["id"], plan["key"], plan["name"], node["id"], name, cname, image["key"], image["lxc_image"], plan["type"], plan["cpu"], plan["ram"], plan["disk"],

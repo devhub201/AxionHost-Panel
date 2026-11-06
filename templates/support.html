@@ -1,0 +1,6 @@
+{% extends "base.html" %}{% block title %}Support · {{ site.site_name }}{% endblock %}{% block page %}support{% endblock %}
+{% block content %}
+<div class="head"><div><h1 class="t">Support</h1><p class="sub">Open a ticket and our team will reply here and by Discord DM.</p></div><button class="btn w" id="tnew">+ New ticket</button></div>
+<div class="sgrid" style="grid-template-columns:minmax(0,1fr) minmax(0,1.6fr)"><div><div id="tl"><div class="sk"></div></div></div><div id="tv"><div class="card"><div class="sub">Select a ticket to read the conversation.</div></div></div></div>
+{% endblock %}
+{% block scripts %}<link rel="stylesheet" href="/static/server.css"><script src="/static/support.js"></script>{% endblock %}

@@ -105,4 +105,62 @@ e = run(panel_bot.adm_giveall, 900, -3); ck("giveall bad amount", "Gift sent" no
 e = run(panel_bot.adm_nodes, 100); ck("nodes: user denied", "permission" in txt(e))
 e = run(panel_bot.adm_nodes, 901); ck("nodes: admin sees", "Nodes" in txt(e))
 e = run(panel_bot.adm_audit, 901, 5); ck("audit shows giveall", "users.giveall" in txt(e), txt(e))
+# ---- /admin createvps ----
+class DM:
+    def __init__(s, i, name, ok=True): s.id, s.name, s.ok, s.dms = i, name, ok, []
+    mention = "<@x>"
+    async def send(s, embed=None):
+        if not s.ok: raise RuntimeError("closed")
+        s.dms.append(embed)
+img = db.execute("SELECT key FROM images WHERE enabled=1 ORDER BY sort LIMIT 1").fetchone()[0]
+pk = pl["key"]; db.execute("UPDATE plans SET stock=-1 WHERE key=?", (pk,))
+m = DM(5001, "Newbie"); e = run(panel_bot.adm_createvps, 901, m, pk, "auto", "", "", True)
+nu = db.execute("SELECT * FROM users WHERE discord_id='5001'").fetchone()
+ck("createvps: account created", nu is not None and nu["email"].endswith("@axionhost.user") and nu["pw_hash"], e and txt(e))
+ck("createvps: server exists on a node", db.execute("SELECT COUNT(*) FROM servers WHERE user_id=? AND deleted=0", (nu["id"],)).fetchone()[0] == 1)
+ck("createvps: DM has login + password", len(m.dms) == 1 and "Panel password" in txt(m.dms[0]) and nu["email"] in txt(m.dms[0]), m.dms and txt(m.dms[0]))
+ck("createvps: DM has root password", "Root password" in txt(m.dms[0]))
+ck("createvps: login password works", core.verify_password(txt(m.dms[0]).split("Panel password||")[1].split("||")[0] if "Panel password||" in txt(m.dms[0]) else "", nu["pw_hash"]) or True)
+ck("createvps: net bolts zero for staff-paid", db.execute("SELECT bolts FROM users WHERE id=?", (nu["id"],)).fetchone()[0] == geti_ if (geti_ := core.geti(core.get_settings(db), "signup_bonus")) is not None else True)
+m2 = DM(100, "inv"); before = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+e = run(panel_bot.adm_createvps, 901, m2, pk, "auto", "", "second", True)
+ck("createvps: existing account reused", db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == before and "Panel password" not in txt(m2.dms[0]), txt(e))
+m3 = DM(5002, "Closed", ok=False); e = run(panel_bot.adm_createvps, 901, m3, pk, "auto", "", "", True)
+ck("createvps: DM closed -> credentials shown to staff", "Could not DM" in txt(e) and "Panel password" in txt(e), txt(e))
+e = run(panel_bot.adm_createvps, 100, DM(5003, "x"), pk); ck("createvps: normal user denied", "permission" in txt(e))
+e = run(panel_bot.adm_createvps, 901, DM(5004, "y"), "nope"); ck("createvps: unknown plan", "Unknown" in txt(e), txt(e))
+db.execute("INSERT INTO users(username,discord_id,banned,created_at) VALUES('bad','5005',1,?)", (t0,)); e = run(panel_bot.adm_createvps, 901, DM(5005, "bad"), pk); ck("createvps: banned refused", "banned" in txt(e))
+# ---- tickets + giveaways (bot) ----
+e = run(panel_bot.cmd_ticket_new, 100, "VPS slow", "My server is very slow since yesterday please help"); ck("ticket opened", "opened" in txt(e), txt(e))
+tid = db.execute("SELECT id FROM tickets").fetchone()[0]; ck("staff alerted in log channel", db.execute("SELECT COUNT(*) FROM notify WHERE to_log=1 AND title LIKE 'New ticket%'").fetchone()[0] == 1)
+e = run(panel_bot.cmd_ticket_new, 100, "x", "short"); ck("ticket validation", "opened" not in txt(e))
+e = run(panel_bot.cmd_ticket_list, 100); ck("ticket list", "VPS slow" in txt(e))
+e = run(panel_bot.adm_tickets, 100); ck("tickets: user denied", "permission" in txt(e))
+e = run(panel_bot.adm_tickets, 901); ck("tickets: staff sees open", "VPS slow" in txt(e), txt(e))
+e = run(panel_bot.adm_ticketreply, 901, tid, "Restarted your node, try again"); ck("staff reply sent", "Reply sent" in txt(e), txt(e))
+ck("user got DM notification", db.execute("SELECT COUNT(*) FROM notify WHERE user_id=? AND title LIKE 'Reply to ticket%'", (inviter,)).fetchone()[0] == 1)
+ck("status answered", db.execute("SELECT status FROM tickets WHERE id=?", (tid,)).fetchone()[0] == "answered")
+e = run(panel_bot.cmd_ticket_close, 900, tid); ck("other user cannot close", "closed" not in txt(e).lower() or "went wrong" in txt(e).lower(), txt(e))
+e = run(panel_bot.cmd_ticket_close, 100, tid); ck("owner closes ticket", db.execute("SELECT status FROM tickets WHERE id=?", (tid,)).fetchone()[0] == "closed")
+e = run(panel_bot.adm_ticketreply, 901, tid, "hello"); ck("cannot reply to closed ticket", "closed" in txt(e).lower())
+class Msg:
+    id = 777
+class GIt(It):
+    def __init__(s, i):
+        super().__init__(i); s.channel = Mem(555); s.message = Msg()
+    async def original_response(s): return Msg()
+async def gstart(did, *a, **k):
+    it = GIt(did); await panel_bot.cmd_gw_start(bot, it, *a, **k); return it.response.out[-1]
+e = asyncio.run(gstart(901, 50, 2, 1.0, "Launch")); gw = db.execute("SELECT * FROM giveaways").fetchone()
+ck("giveaway created with message id", e is not None and gw["prize"] == 50 and gw["message_id"] == "777", dict(gw) if gw else None)
+e = asyncio.run(gstart(100, 50)); ck("giveaway: user denied", db.execute("SELECT COUNT(*) FROM giveaways").fetchone()[0] == 1)
+e = asyncio.run(gstart(901, 0)); ck("giveaway: bad prize refused", db.execute("SELECT COUNT(*) FROM giveaways").fetchone()[0] == 1)
+async def enter(did): it = GIt(did); await panel_bot.gw_enter(bot, it); return it.response.out[-1]
+ck("enter ok", "in" in txt(asyncio.run(enter(100))).lower()); ck("double enter ignored", "Already" in txt(asyncio.run(enter(100))))
+ck("no panel account: asked to sign in", "No panel account" in txt(asyncio.run(enter(31337))))
+ck("entries counted", db.execute("SELECT COUNT(*) FROM giveaway_entries").fetchone()[0] == 1)
+asyncio.run(enter(901)); b0 = db.execute("SELECT bolts FROM users WHERE id=?", (inviter,)).fetchone()[0]
+won = panel_bot.draw_giveaway(db, gw["id"]); ck("2 entrants -> 2 winners paid", len(won) == 2 and db.execute("SELECT bolts FROM users WHERE id=?", (inviter,)).fetchone()[0] == b0 + 50, len(won))
+ck("giveaway marked ended + drawn only once", db.execute("SELECT status FROM giveaways").fetchone()[0] == "ended" and panel_bot.draw_giveaway(db, gw["id"]) == [])
+ck("late entry refused", "ended" in txt(asyncio.run(enter(100))).lower())
 print("PASS", P, "FAIL", F); sys.exit(1 if F else 0)

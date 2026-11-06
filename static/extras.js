@@ -1,0 +1,30 @@
+"use strict";
+/* Manage-server extras: snapshots and public port forwards. */
+window.AXE = (() => {
+  let sid = 0, data = null, srv = null, timer = null;
+  const sz = b => !b ? "" : b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : Math.round(b / 1e6) + " MB";
+  const ago = t => { const s = Math.max(0, Date.now() / 1000 - t); return s < 90 ? "just now" : s < 5400 ? Math.round(s / 60) + " min ago" : s < 129600 ? Math.round(s / 3600) + " h ago" : Math.round(s / 86400) + " d ago"; };
+  function draw() {
+    const box = document.getElementById("xslot"); if (!box || !data) return;
+    const run = srv && srv.status === "running", busy = srv && (srv.status === "provisioning" || srv.status === "deleting");
+    const sn = data.snapshots, pt = data.ports.filter(p => p.status !== "deleting");
+    const snHtml = sn.length ? sn.map(x => `<div class="crow" style="gap:12px"><span style="width:auto;flex:1;text-transform:none;letter-spacing:0;font-size:13.5px;color:#e6e6ea;font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(x.name)}<small style="display:block;color:var(--mut);font-weight:500">${x.status === "ready" ? ago(x.created) + (x.size ? " • " + sz(x.size) : "") : x.status === "failed" ? "failed: " + esc(x.note || "") : esc(x.status) + "…"}</small></span>
+        ${x.status === "ready" ? `<button data-sr="${x.id}" ${busy ? "disabled" : ""}>Restore</button>` : ""}<button data-sd="${x.id}" ${["creating", "deleting"].includes(x.status) || busy ? "disabled" : ""}>Delete</button></div>`).join("") : '<div class="sub">No snapshots yet. A snapshot saves the whole disk so you can roll back later.</div>';
+    const ptHtml = pt.length ? pt.map(p => `<div class="crow"><span style="width:auto">${p.proto.toUpperCase()}</span><code>${esc(data.host || "node")}:${p.public} → ${p.target}</code><button data-pc="${esc((data.host || "") + ":" + p.public)}">Copy</button><button data-pd="${p.id}">✕</button></div>`).join("") : '<div class="sub">No extra ports. Forward one to host a website, game server or API.</div>';
+    box.innerHTML = `<div class="card"><div class="row sp"><div><h3>Snapshots</h3><div class="d" style="margin:0">${sn.filter(x => x.status !== "failed").length}/${data.limits.snapshots} used</div></div><button class="btn sm w" id="sn-new" ${!(run || srv.status === "stopped") || busy ? "disabled" : ""}>+ Create snapshot</button></div><div class="conn" style="margin-top:12px">${snHtml}</div></div>
+      <div class="card" style="margin-top:16px"><div class="row sp"><div><h3>Public ports</h3><div class="d" style="margin:0">${pt.length}/${data.limits.ports} used • server must be running</div></div><button class="btn sm w" id="pt-new" ${!run ? "disabled" : ""}>+ Forward a port</button></div><div class="conn" style="margin-top:12px">${ptHtml}</div></div>`;
+    box.querySelectorAll("[data-pc]").forEach(b => b.onclick = () => navigator.clipboard && navigator.clipboard.writeText(b.dataset.pc).then(() => toast("Copied")));
+    $("#sn-new", box).onclick = () => modal(`<h3>Create snapshot</h3><p class="sub">Saves the current state of this server. It can take a minute or two for big disks.</p><label class="f">Name</label><input class="i" id="snn" maxlength="32" placeholder="before-update"><div class="msg" id="snm"></div><div class="row" style="margin-top:14px;justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn w" id="snok">Create</button></div>`, m => $("#snok", m).onclick = async () => {
+      const r = await api("POST", `/api/servers/${sid}/snapshots`, { name: $("#snn", m).value }); if (r.ok) { closeModal(); toast("Snapshot started"); load(); } else { $("#snm", m).textContent = r.error; $("#snm", m).className = "msg"; } });
+    $("#pt-new", box).onclick = () => modal(`<h3>Forward a port</h3><p class="sub">Choose the port your app listens on inside the server. You get a public port on the node that points to it.</p><div class="grid g2"><div><label class="f">Server port</label><input class="i" id="ptp" type="number" min="1" max="65535" placeholder="25565"></div><div><label class="f">Protocol</label><select class="i" id="ptt"><option>tcp</option><option>udp</option></select></div></div><div class="msg" id="ptm"></div><div class="row" style="margin-top:14px;justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn w" id="ptok">Forward</button></div>`, m => $("#ptok", m).onclick = async () => {
+      const r = await api("POST", `/api/servers/${sid}/ports`, { port: +$("#ptp", m).value, proto: $("#ptt", m).value }); if (r.ok) { closeModal(); toast("Public port " + r.public_port + " opened"); load(); } else { $("#ptm", m).textContent = r.error; $("#ptm", m).className = "msg"; } });
+    box.querySelectorAll("[data-sr]").forEach(b => b.onclick = async () => { if (!confirm("Restore this snapshot? Everything changed since it was taken will be lost.")) return; const r = await api("POST", `/api/servers/${sid}/snapshots/${b.dataset.sr}/restore`); toast(r.ok ? "Restoring…" : r.error, !r.ok); if (r.ok) { window.AXP && AXP.reload ? AXP.reload() : setTimeout(() => location.reload(), 800); } });
+    box.querySelectorAll("[data-sd]").forEach(b => b.onclick = async () => { if (!confirm("Delete this snapshot?")) return; const r = await api("POST", `/api/servers/${sid}/snapshots/${b.dataset.sd}/delete`); toast(r.ok ? "Deleting…" : r.error, !r.ok); load(); });
+    box.querySelectorAll("[data-pd]").forEach(b => b.onclick = async () => { if (!confirm("Close this public port?")) return; const r = await api("POST", `/api/servers/${sid}/ports/${b.dataset.pd}/delete`); toast(r.ok ? "Port closed" : r.error, !r.ok); load(); });
+  }
+  async function load() {
+    clearTimeout(timer); const r = await api("GET", `/api/servers/${sid}/extras`); if (!r.ok) return; data = r; draw();
+    if (r.snapshots.some(x => ["creating", "deleting"].includes(x.status)) || r.ports.some(p => p.status === "deleting")) timer = setTimeout(load, 4000);
+  }
+  return { mount(id, s) { sid = id; srv = s; draw(); if (!data || data.sid !== id) { data = data || null; } load(); } };
+})();

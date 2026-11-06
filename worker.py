@@ -175,7 +175,7 @@ class Worker:
     def __init__(self, cfg, db=None, run=real_run, sleep=time.sleep):
         self.cfg, self.run, self.sleep = cfg, run, sleep
         self.db = db or core.connect(cfg["db_path"]); core.init_db(self.db)
-        self.last = dict(sync=0, bill=0, scan=0, disk=0, tools=0, nodes=0, stats=0)
+        self.last = dict(sync=0, bill=0, scan=0, disk=0, tools=0, nodes=0, stats=0, ports=0)
         self.docker_mode = str(cfg.get("backend", "lxd")).lower() == "docker"
         self.cur_node, self._ssh = None, {}
         self.datadir = os.path.dirname(os.path.abspath(cfg["db_path"]))
@@ -381,11 +381,122 @@ class Worker:
     def job_stop(self, s, p): return self.simple(s, "stop", "stopped")
     def job_restart(self, s, p): return self.simple(s, "restart", "running")
 
+    # ---- snapshots ----
+    def snap_ref(self, s, sn): return "axs-%d:%d" % (s["id"], sn["id"])
+
+    def job_snapshot(self, s, p):
+        sn = self.db.execute("SELECT * FROM snapshots WHERE id=? AND server_id=?", (int(p.get("id") or 0), s["id"])).fetchone()
+        if not sn: raise JobError("snapshot row missing")
+        try:
+            if self.docker_mode:
+                ref = self.snap_ref(s, sn)
+                self.dk("commit", "--pause=false", "-m", "axionhost snapshot", self.cname(s), ref, timeout=1800)
+                rc, out = self.dk("image", "inspect", "-f", "{{.Size}}", ref, check=False, timeout=60)
+                size = int(out.strip()) if rc == 0 and out.strip().isdigit() else None
+            else:
+                ref = "axs%d" % sn["id"]; self.lxc("snapshot", self.target(s), ref, timeout=1800); size = None
+        except Exception as e:
+            self.db.execute("UPDATE snapshots SET status='failed',note=? WHERE id=?", (str(e)[:200], sn["id"])); raise
+        self.db.execute("UPDATE snapshots SET status='ready',ref=?,size=? WHERE id=?", (ref, size, sn["id"]))
+        ops.notify(self.db, s["user_id"], "Snapshot ready", "Snapshot **%s** of **%s** is ready." % (sn["name"], s["name"]), "snapshot_ok")
+        return "snapshot ready"
+
+    def job_restore(self, s, p):
+        sn = self.db.execute("SELECT * FROM snapshots WHERE id=? AND server_id=? AND status='ready'", (int(p.get("id") or 0), s["id"])).fetchone()
+        if not sn: raise JobError("snapshot not ready")
+        was = s["status"]
+        try:
+            if self.docker_mode:
+                name = self.cname(s); old = name + "-old"
+                self.dk("rm", "-f", old, check=False, timeout=60)
+                self.dk("stop", "-t", "10", name, check=False, timeout=120); self.dk("rename", name, old)
+                self.dk("update", "--restart=no", old, check=False, timeout=30)
+                try: self.provision_docker(s, "local:" + sn["ref"])
+                except Exception:
+                    self.dk("rm", "-f", name, check=False, timeout=60); self.dk("rename", old, name, check=False)
+                    self.dk("update", "--restart=unless-stopped", name, check=False, timeout=30); self.dk("start", name, check=False, timeout=60); raise
+                self.dk("rm", "-f", "-v", old, check=False, timeout=120)
+            else:
+                t = self.target(s); self.lxc("restore", t, sn["ref"], timeout=900)
+                if was == "running": self.lxc("start", t, check=False, timeout=180)
+        except Exception:
+            self.db.execute("UPDATE servers SET status=? WHERE id=?", (was if was in ("running", "stopped") else "running", s["id"])); raise
+        self.db.execute("UPDATE servers SET status='running',disk_used=NULL,disk_checked=NULL WHERE id=?", (s["id"],))
+        ops.notify(self.db, s["user_id"], "Snapshot restored", "**%s** was restored from snapshot **%s**." % (s["name"], sn["name"]), "restore_ok")
+        self.apply_ports(s["node_id"], force=True)
+        return "restored"
+
+    def job_snapdel(self, s, p):
+        sn = self.db.execute("SELECT * FROM snapshots WHERE id=? AND server_id=?", (int(p.get("id") or 0), s["id"])).fetchone()
+        if not sn: return "gone"
+        if sn["ref"]:
+            if self.docker_mode: self.dk("rmi", sn["ref"], check=False, timeout=120)
+            else: self.lxc("delete", "%s/%s" % (self.target(s), sn["ref"]), check=False, timeout=120)
+        self.db.execute("DELETE FROM snapshots WHERE id=?", (sn["id"],)); return "deleted"
+
+    # ---- extra public ports ----
+    def container_ip(self, s):
+        if self.docker_mode:
+            rc, out = self.dk("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", self.cname(s), check=False, timeout=30)
+            ip = out.strip().splitlines()[-1].strip() if rc == 0 and out.strip() else ""
+            return ip if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip) else ""
+        return ""
+
+    def job_ports(self, s, p): self.apply_ports(s["node_id"], force=True); return "ports applied"
+
+    def apply_ports(self, node_id, force=False):
+        """Make the node match the port_forwards table. Docker: iptables DNAT rules tagged axp-pf-<id>. LXD: proxy devices."""
+        self.on(node_id)
+        rows = self.db.execute("SELECT f.*,s.container,s.id sid,s.status sstatus,s.deleted sdel,s.node_id FROM port_forwards f JOIN servers s ON s.id=f.server_id WHERE s.node_id=?", (node_id,)).fetchall()
+        active = [r for r in rows if r["status"] == "active" and not r["sdel"] and r["sstatus"] == "running" and CONT_RE.match(r["container"])]
+        if self.docker_mode:
+            ips = {}; lines = []
+            for r in active:
+                if r["container"] not in ips:
+                    ips[r["container"]] = self.container_ip({"container": r["container"], "node_id": node_id})
+                ip = ips[r["container"]]
+                if not ip: continue
+                pr = r["proto"] if r["proto"] in ("tcp", "udp") else "tcp"
+                lines.append("iptables -t nat -A PREROUTING -p %s --dport %d -m comment --comment axp-pf-%d -j DNAT --to-destination %s:%d" % (pr, r["public_port"], r["id"], ip, r["target_port"]))
+                lines.append("iptables -I $CH -p %s -d %s --dport %d -m comment --comment axp-pf-%d -j ACCEPT" % (pr, ip, r["target_port"], r["id"]))
+            script = ("command -v iptables >/dev/null 2>&1 || { echo 'iptables is not installed on this node'; exit 3; }\n"
+                      "CH=DOCKER-USER; iptables -S DOCKER-USER >/dev/null 2>&1 || CH=FORWARD\n"
+                      "iptables -t nat -S PREROUTING | grep axp-pf- | sed 's/^-A/-D/' | while read -r l; do iptables -t nat $l; done\n"
+                      "iptables -S $CH | grep axp-pf- | sed 's/^-A/-D/' | while read -r l; do iptables $l; done\n" + "\n".join(lines) + "\n")
+            key = (node_id, script); last = self.__dict__.setdefault("_ports_applied", {})
+            if force or last.get(node_id) != (script, now() // 300):
+                rc, out = self._exec(["sh", "-s"], input=script, timeout=60)
+                if rc != 0: raise JobError("port forwarding failed: %s" % out[-200:])
+                last[node_id] = (script, now() // 300)
+        else:
+            for r in rows:
+                if not CONT_RE.match(r["container"]): continue
+                rem = (self.db.execute("SELECT lxc_remote FROM nodes WHERE id=?", (node_id,)).fetchone()[0] or "")
+                t = (rem + ":" if rem else "") + r["container"]; dev = "pf%d" % r["id"]
+                if r in active: self.lxc("config", "device", "add", t, dev, "proxy", "listen=%s:0.0.0.0:%d" % (r["proto"], r["public_port"]), "connect=%s:127.0.0.1:%d" % (r["proto"], r["target_port"]), check=False)
+                elif r["status"] == "deleting": self.lxc("config", "device", "remove", t, dev, check=False)
+        self.db.execute("DELETE FROM port_forwards WHERE status='deleting' AND server_id IN (SELECT id FROM servers WHERE node_id=?)", (node_id,))
+
+    def sync_ports(self):
+        for n in self.live_nodes():
+            if self.db.execute("SELECT 1 FROM port_forwards f JOIN servers s ON s.id=f.server_id WHERE s.node_id=? LIMIT 1", (n["id"],)).fetchone() or self.__dict__.get("_ports_applied", {}).get(n["id"]):
+                try: self.apply_ports(n["id"])
+                except JobError: log.warning("port sync failed on node %s", n["id"], exc_info=True)
+
     def job_delete(self, s, p):
         self.tools_reset(s["id"])
         if self.docker_mode: self.dk("rm", "-f", "-v", self.cname(s), check=False, timeout=180)
         else: self.lxc("delete", self.target(s), "--force", check=False, timeout=180)
-        self.db.execute("UPDATE servers SET deleted=1,status='deleted',ssh_port=NULL WHERE id=?", (s["id"],)); return "deleted"
+        for sn in self.db.execute("SELECT * FROM snapshots WHERE server_id=?", (s["id"],)).fetchall():
+            try:
+                if sn["ref"]:
+                    if self.docker_mode: self.dk("rmi", sn["ref"], check=False, timeout=120)
+            except JobError: pass
+        self.db.execute("DELETE FROM snapshots WHERE server_id=?", (s["id"],)); self.db.execute("DELETE FROM port_forwards WHERE server_id=?", (s["id"],))
+        self.db.execute("UPDATE servers SET deleted=1,status='deleted',ssh_port=NULL WHERE id=?", (s["id"],))
+        try: self.apply_ports(s["node_id"], force=True)
+        except JobError: pass
+        return "deleted"
 
     # ---- periodic ----
 
@@ -444,11 +555,31 @@ class Worker:
             try: rc, out = self._exec(["sh", "-s"], input=nodes.HEALTH_SCRIPT, timeout=45)
             except JobError as e: rc, out = 255, str(e)
             if rc != 0:
-                self.db.execute("UPDATE nodes SET health='offline',health_note=? WHERE id=?", ((out or "unreachable")[-200:], n["id"])); continue
+                self.db.execute("UPDATE nodes SET health='offline',health_note=? WHERE id=?", ((out or "unreachable")[-200:], n["id"])); self.record_up(n["id"], False); self.node_alert(n, {"offline": (out or "unreachable")[-120:]}); continue
             h = nodes.parse_health(out); ok = h["docker"] if self.docker_mode else h["lxd"]
+            s = core.get_settings(self.db); prob = {}
+            if not ok: prob["offline"] = "engine not running"
+            if h["disk_total"] and h["disk_free"] is not None and h["disk_free"] * 100 < h["disk_total"] * (geti(s, "node_disk_alert_pct") or 10): prob["disk"] = "only %.1f GB free of %.0f GB" % (h["disk_free"] / core.GB, h["disk_total"] / core.GB)
+            try:
+                if h["load1"] and h["cpu_total"] and h["load1"] > h["cpu_total"] * float(s.get("node_load_factor") or 1.5): prob["load"] = "load %.1f on %d cores" % (h["load1"], h["cpu_total"])
+            except (TypeError, ValueError): pass
+            self.record_up(n["id"], ok); self.node_alert(n, prob)
             self.db.execute("UPDATE nodes SET health=?,health_note=?,cpu_total=?,ram_total=?,disk_total=?,disk_free=?,load1=?,seen_at=? WHERE id=?",
                             ("online" if ok else "offline", "" if ok else ("Docker is not installed or not running" if self.docker_mode else "LXD is not installed or not running"),
                              h["cpu_total"], h["ram_total"], h["disk_total"], h["disk_free"], h["load1"], now(), n["id"]))
+
+    def record_up(self, node_id, up):
+        t = now() // 60 * 60
+        self.db.execute("INSERT OR REPLACE INTO status_hist(node_id,t,up) VALUES(?,?,?)", (node_id, t, 1 if up else 0))
+        if t % 3600 < 60: self.db.execute("DELETE FROM status_hist WHERE t<?", (now() - 31 * 86400,))
+
+    def node_alert(self, n, problems):
+        """Alert staff once when a node enters a bad state (offline / disk low / load high) and once when it recovers."""
+        now_set = set(problems); was = set(filter(None, (self.db.execute("SELECT alert_state FROM nodes WHERE id=?", (n["id"],)).fetchone()[0] or "").split(",")))
+        if now_set == was: return
+        for k in sorted(now_set - was): ops.staff_alert(self.db, "Node %s: %s" % (n["name"], k), problems[k], "staff")
+        if was and not now_set: ops.staff_alert(self.db, "Node %s recovered" % n["name"], "All checks are healthy again.", "staff")
+        self.db.execute("UPDATE nodes SET alert_state=? WHERE id=?", (",".join(sorted(now_set)), n["id"]))
 
     def sync_stats(self):
         """Live CPU / RAM per VPS (its own cgroup numbers, never the host's)."""
@@ -471,6 +602,28 @@ class Worker:
                 v = vals.get(r["container"]) if r["status"] == "running" else None
                 cpu = None if not v or v[0] is None else max(0.0, min(100.0, v[0] / max(1, r["cpu"])))
                 self.db.execute("UPDATE servers SET cpu_pct=?,mem_used=?,stat_at=? WHERE id=?", (cpu, v[1] if v else None, now(), r["id"]))
+                if v is not None and r["status"] == "running":
+                    self.db.execute("INSERT OR REPLACE INTO stat_hist(server_id,t,cpu,mem) VALUES(?,?,?,?)", (r["id"], now() // 60 * 60, cpu, v[1]))
+                    self.abuse_check(r["id"], cpu)
+        self.db.execute("DELETE FROM stat_hist WHERE t<?", (now() - 86400,))
+
+    def abuse_check(self, sid, cpu):
+        """Sustained near-100% CPU for N minutes -> alert staff (and optionally suspend). Streak resets as soon as load drops."""
+        s = core.get_settings(self.db); limit = geti(s, "abuse_cpu_pct") or 95; need = geti(s, "abuse_minutes") or 20
+        r = self.db.execute("SELECT * FROM servers WHERE id=?", (sid,)).fetchone()
+        if cpu is None or cpu < limit:
+            if r["abuse_streak"] or r["abuse_flag"]: self.db.execute("UPDATE servers SET abuse_streak=0,abuse_flag=0 WHERE id=?", (sid,))
+            return
+        st = r["abuse_streak"] + 1; self.db.execute("UPDATE servers SET abuse_streak=? WHERE id=?", (st, sid))
+        if st < need or r["abuse_flag"]: return
+        self.db.execute("UPDATE servers SET abuse_flag=1 WHERE id=?", (sid,))
+        act = (s.get("abuse_action") or "alert").lower()
+        ops.staff_alert(self.db, "High CPU abuse", "Server #%d (%s) of user %d used >= %d%% CPU for %d minutes. Action: **%s**." % (sid, r["container"], r["user_id"], limit, st, act))
+        audit(self.db, None, "server.abuse_cpu", sid, "%d min >= %d%%" % (st, limit))
+        if act == "suspend" and not r["suspended"]:
+            with tx(self.db):
+                self.db.execute("UPDATE servers SET suspended=1,suspend_reason='abuse: sustained 100% CPU' WHERE id=?", (sid,)); ops.queue(self.db, sid, "stop")
+                ops.notify(self.db, r["user_id"], "Server suspended - high CPU abuse", "**%s** ran at full CPU for %d minutes and was suspended. Contact support if this was a mistake." % (r["name"], st), "suspended")
 
     def job_resetpw(self, s, p):
         if s["status"] != "running": raise JobError("start the server first")
@@ -592,7 +745,7 @@ class Worker:
 
     def tick(self):
         n = self.process_jobs(); t = now()
-        for name, every, fn in (("sync", 30, self.sync_status), ("disk", 60, self.sync_disk), ("bill", 60, self.billing), ("scan", 300, self.scan_miners), ("tools", 60, self.sync_tools), ("nodes", 60, self.sync_nodes), ("stats", 60, self.sync_stats)):
+        for name, every, fn in (("sync", 30, self.sync_status), ("disk", 60, self.sync_disk), ("bill", 60, self.billing), ("scan", 300, self.scan_miners), ("tools", 60, self.sync_tools), ("nodes", 60, self.sync_nodes), ("ports", 60, self.sync_ports), ("stats", 60, self.sync_stats)):
             if t - self.last[name] >= every:
                 self.last[name] = t
                 try: fn()

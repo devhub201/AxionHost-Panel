@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block title %}Status · {{ site.site_name }}{% endblock %}{% block page %}status{% endblock %}
+{% block body %}<main><div class="wrap" style="max-width:860px;padding-top:34px">
+<a class="sub" href="/">← {{ site.site_name }}</a>
+<div class="hero" id="sh" style="margin-top:12px"><div class="top2"><div><h1>System status</h1><div class="meta" id="smeta">Checking…</div></div><div id="sbadge"></div></div></div>
+<div id="sn"><div class="sk"></div></div>
+<p class="sub" style="text-align:center;margin-top:18px">Updates every minute. Uptime is measured from the panel's health checks of each node.</p>
+</div></main>{% endblock %}
+{% block scripts %}<link rel="stylesheet" href="/static/server.css"><script src="/static/status.js"></script>{% endblock %}

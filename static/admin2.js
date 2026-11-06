@@ -13,11 +13,12 @@ S.overview = async () => {
   await ov(); const r = await api("GET", "/api/admin/stats"); if (!r.ok || A.pane.querySelector("#nh")) return;
   const nodes = r.nodes || [];
   const box = document.createElement("div"); box.id = "nh"; box.style.marginTop = "16px";
-  box.innerHTML = `<div class="card"><div class="row sp"><div><h3>Nodes</h3><div class="d">Health and capacity</div></div>${isOwner ? '<button class="btn w sm" id="ga">🎁 Give BOLTs to everyone</button>' : ""}</div>
+  box.innerHTML = `<div class="card"><div class="row sp"><div><h3>Nodes</h3><div class="d">Health and capacity</div></div><div class="row" style="gap:8px">${canW ? '<button class="btn sm" id="sl">🏷 Run a sale</button>' : ""}${isOwner ? '<button class="btn w sm" id="ga">🎁 Give BOLTs to everyone</button>' : ""}</div></div>
    <div class="grid g2" style="margin-top:12px">${nodes.map(n => { const used = n.disk ? (n.disk - (n.free || 0)) / n.disk * 100 : 0, sp = n.cap ? n.servers / n.cap * 100 : 0;
      return `<div class="card" style="background:rgba(255,255,255,.03)"><div class="row sp"><b>${esc(n.flag || "")} ${esc(n.name)}</b>${hp(n.health)}</div><div class="sub">${n.transport === "ssh" ? "SSH node" : "This machine"} • ${n.cpu || "?"} vCPU • ${gb(n.ram)} RAM${n.load != null ? " • load " + n.load : ""}</div>
      <div class="sub" style="margin-top:8px">Servers ${n.servers}/${n.cap}</div>${bar(sp)}<div class="sub" style="margin-top:8px">Disk ${gb(n.disk - (n.free || 0))} / ${gb(n.disk)}</div>${bar(used)}</div>`; }).join("") || '<div class="sub">No nodes</div>'}</div></div>`;
   A.pane.appendChild(box);
+  const sl = $("#sl"); if (sl) sl.onclick = () => modal(`<h3>Run a sale</h3><p class="sub">Discounts the first month of new deploys. Set 0% to end a sale.</p><label class="f">Discount %</label><input class="i" id="slp" type="number" min="0" max="90" value="20"><label class="f">Lasts (hours)</label><input class="i" id="slh" type="number" min="1" value="48"><div class="msg" id="slm"></div><div class="row" style="margin-top:14px;justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn w" id="slok">Apply to all plans</button></div>`, m => $("#slok", m).onclick = async () => { const x = await api("POST", "/api/admin/sale", { pct: +$("#slp", m).value, hours: +$("#slh", m).value, plan: "all" }); if (x.ok) { closeModal(); toast("Sale updated on " + x.plans + " plans"); } else { $("#slm", m).textContent = x.error; $("#slm", m).className = "msg"; } });
   const g = $("#ga"); if (g) g.onclick = () => modal(`<h3>Give BOLTs to everyone</h3><p class="sub">Credits every non-banned account. Recorded in the ledger and audit log. Max 1,000,000 each.</p>
     <label class="f">Amount each</label><input class="i" id="gam" type="number" min="1" placeholder="e.g. 50"><label class="f">Reason (shown in ledger)</label><input class="i" id="grs" placeholder="Diwali gift">
     <label class="f row sp" style="margin-top:14px">Only users with Discord linked<span class="sw"><input type="checkbox" id="gdo"><i></i></span></label><div class="msg" id="gm"></div>
@@ -74,6 +75,26 @@ S.nodes = async () => {
   $$("[data-t]", pane).forEach(b => b.onclick = async () => { b.disabled = true; b.textContent = "…"; const x = await api("POST", `/api/admin/nodes/${b.dataset.t}/test`); toast(x.ok ? (x.report.engine_ok ? "Node online" : "Connected, but " + x.report.engine + " is missing") : x.error, !x.ok || !x.report.engine_ok); S.nodes(); });
   $$("[data-r]", pane).forEach(b => b.onclick = async () => { if (!confirm("Forget the saved SSH host key? Only do this if the server was reinstalled or the Pinggy address changed.")) return; const x = await api("POST", `/api/admin/nodes/${b.dataset.r}/reset_trust`); toast(x.ok ? "Trust reset – test the node again" : x.error, !x.ok); });
   $$("[data-d]", pane).forEach(b => b.onclick = () => modal(`<h3>Delete node?</h3><p class="sub">Only possible when it has no servers.</p><div class="row" style="margin-top:16px;justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn red" id="y">Delete</button></div>`, m => $("#y", m).onclick = async () => { const x = await api("POST", "/api/admin/nodes/delete", { id: +b.dataset.d }); if (x.ok) { closeModal(); S.nodes(); } else toast(x.error, true); }));
+};
+
+
+/* ---------- Tickets ---------- */
+const when = t => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+S.tickets = async (filter) => {
+  A.cur("tickets"); filter = filter || "open"; const r = await api("GET", "/api/admin/tickets?status=" + filter); if (!r.ok) { pane.innerHTML = '<div class="card">' + esc(r.error) + "</div>"; return; }
+  pane.innerHTML = hdr("Tickets", "User support requests. Replies are sent to the user by Discord DM.", `<select class="i" id="tf" style="width:auto"><option value="open" ${filter === "open" ? "selected" : ""}>Open</option><option value="all" ${filter === "all" ? "selected" : ""}>All</option><option value="closed" ${filter === "closed" ? "selected" : ""}>Closed</option></select>`) +
+    tbl(["#", "Subject", "User", "Status", "Updated", ""], r.tickets.map(t => `<tr><td>${t.id}</td><td>${esc(t.subject)}</td><td>${esc(t.user || "")}</td><td>${hp(t.status === "answered" ? "online" : t.status === "closed" ? "offline" : "unknown").replace(/online|offline|unknown/, t.status)}</td><td class="sub">${when(t.updated)}</td><td style="text-align:right"><button class="btn sm" data-o="${t.id}">Open</button></td></tr>`));
+  $("#tf").onchange = e => S.tickets(e.target.value);
+  $$("[data-o]", pane).forEach(b => b.onclick = async () => {
+    const id = +b.dataset.o, x = await api("GET", "/api/admin/tickets/" + id); if (!x.ok) return toast(x.error, true);
+    const closed = x.ticket.status === "closed";
+    modal(`<h3>#${id} ${esc(x.ticket.subject)} <span class="sub">${esc(x.ticket.user || "")}</span></h3><div id="amsgs" style="display:flex;flex-direction:column;gap:8px;margin:12px 0;max-height:50vh;overflow:auto">${x.messages.map(m => `<div style="align-self:${m.staff ? "flex-end" : "flex-start"};max-width:88%;background:${m.staff ? "rgba(107,123,255,.14)" : "rgba(255,255,255,.07)"};border:1px solid var(--line);border-radius:12px;padding:9px 12px"><div class="sub" style="font-size:11.5px">${esc(m.who)}${m.staff ? " (staff)" : ""} • ${when(m.at)}</div><div style="white-space:pre-wrap;word-break:break-word">${esc(m.body)}</div></div>`).join("")}</div>
+      ${closed ? '<div class="sub">Closed.</div>' : '<textarea class="i" id="ar" rows="3" maxlength="4000" style="width:100%" placeholder="Reply to the user…"></textarea><div class="msg" id="am"></div><div class="row" style="margin-top:12px;justify-content:flex-end"><button class="btn" data-close>Cancel</button><button class="btn red" id="acl">Close</button><button class="btn w" id="asd">Reply</button></div>'}`, m => {
+      const box = $("#amsgs", m); box.scrollTop = box.scrollHeight; if (closed) return;
+      $("#asd", m).onclick = async () => { const y = await api("POST", `/api/admin/tickets/${id}/reply`, { body: $("#ar", m).value }); if (y.ok) { closeModal(); toast("Reply sent"); S.tickets(filter); } else { $("#am", m).textContent = y.error; $("#am", m).className = "msg"; } };
+      $("#acl", m).onclick = async () => { const y = await api("POST", `/api/admin/tickets/${id}/close`); if (y.ok) { closeModal(); S.tickets(filter); } else toast(y.error, true); };
+    });
+  });
 };
 
 /* ---------- Admin console into any VPS (adds a button to the server modal) ---------- */

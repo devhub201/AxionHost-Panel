@@ -31,3 +31,4 @@
 @media(max-width:520px){.hero{padding:18px 16px;border-radius:16px}.hero .acts .btn{flex:1}.tile b{font-size:22px}}
 .sgrid>div>div:empty{display:none}
 #tools{display:flex;flex-direction:column;gap:16px}#tools>*{margin:0!important}
+.sgrid .chip{border:1px solid var(--line2);background:transparent;color:var(--mut);border-radius:99px;padding:4px 12px;font-size:12.5px;cursor:pointer;transition:.2s}.sgrid .chip:hover{color:#fff}.sgrid .chip.on{background:#fff;color:#000;border-color:#fff}

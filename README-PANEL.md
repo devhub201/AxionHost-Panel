@@ -104,3 +104,12 @@ Tested here with mocks: **98 web/worker checks + 13 bot checks pass**, pages scr
 Switch engine on an installed panel: `sudo ./install-panel.sh engine docker` (or `lxd`).
 VPS made with the old engine are not moved; delete and redeploy them.
 Disk usage per VPS (Docker) is the container's own writable layer, the host disk is never shown.
+
+## New in this release
+- **Snapshots** (docker commit) + restore, **port forwarding** (iptables DNAT / LXD proxy), **live CPU/RAM/net graphs**
+- **Dark/Light theme** toggle, public **/status** page, **/support** ticket system (web + bot `/ticket`)
+- **Referral links** (`/r/<code>`), **plan sales** (admin → Run a sale), **auto node placement**
+- **Abuse protection** (sustained CPU → alert or auto-suspend), node resource alerts
+- **Giveaways** (`/giveaway start`), bot server buttons, `/admin createvps` (creates account + DMs login/password if user not registered)
+- Settings in Admin → Settings: referral_*, snapshots_per_server, ports_per_server, port_range, abuse_*, node_*_alert
+Limits: port forwarding needs `iptables` on the node; abuse detection is CPU-only.
