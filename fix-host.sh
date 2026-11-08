@@ -9,7 +9,6 @@ say(){ printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 
 say "Purane processes band kar raha hoon"
 pkill -f "axion-watch" 2>/dev/null; pkill -f "$DIR/app.py|python.* app.py|python.* worker.py|python.* panel_bot.py" 2>/dev/null
-service cloudflared stop >/dev/null 2>&1; pkill -f "cloudflared.*tunnel" 2>/dev/null; sleep 1
 
 # watchdog: process crash ho to 3 sec mein restart
 watch(){ local name=$1; shift; setsid nohup bash -c "exec -a axion-watch-$name bash -c 'while true; do \"\$@\" >> $LOGD/$name.log 2>&1; echo \"[\$(date)] $name exited, restarting\" >> $LOGD/$name.log; sleep 3; done' _ \"\$@\"" _ "$@" >/dev/null 2>&1 & }
@@ -26,6 +25,7 @@ TOK="$1"
 [ -z "$TOK" ] && TOK=$(grep -rhoE "eyJ[A-Za-z0-9_=-]{50,}" /etc/init.d/cloudflared /etc/default/cloudflared 2>/dev/null | head -1)
 if command -v cloudflared >/dev/null; then
   if [ -n "$TOK" ]; then
+    service cloudflared stop >/dev/null 2>&1; pkill -f "cloudflared.*tunnel" 2>/dev/null; sleep 1
     watch tunnel cloudflared tunnel --no-autoupdate run --token "$TOK"; sleep 6
     if grep -qiE "Registered tunnel connection|Connection .* registered" $LOGD/tunnel.log; then echo "✅ Tunnel connected"; else echo "⚠ Tunnel log:"; tail -8 $LOGD/tunnel.log; fi
   else echo "⚠ Tunnel token nahi mila. Cloudflare → Zero Trust → Tunnels → apna tunnel → token copy karo, phir chalao:  bash fix-host.sh TOKEN"; fi
