@@ -28,7 +28,8 @@ cmds = [" ".join(map(str, c[0])) for c in LOG]
 q = next(c for c in LOG if c[0][0] == "qemu-system-x86_64")[0]
 ck("tcg when no kvm", "-accel" in q and q[q.index("-accel") + 1].startswith("tcg"))
 ck("ram/cpu", "-m" in q and q[q.index("-m") + 1] == "4096M" and q[q.index("-smp") + 1] == "2")
-ck("ssh hostfwd", any("hostfwd=tcp:0.0.0.0:23001-:22" in x for x in q))
+ck("ssh hostfwd", any("hostfwd=tcp::23001-:22" in x for x in q))
+db.execute("UPDATE nodes SET listen='[::]'"); q6 = w.q_hostfwds(s); ck("ipv6 listen -> all-ipv4 rule", q6 == "hostfwd=tcp::23001-:22", q6)
 ck("qcow2 disk size", any(c[:2] == ["qemu-img", "create"] and "20G" in c for c, _ in LOG))
 ck("image downloaded", any(c[0] == "curl" and "jammy" in " ".join(c) for c, _ in LOG))
 ck("password has no quote", "pw'x" not in next(i for c, i in LOG if c[0] == "tee" and i and "chpasswd" in i) and "pwx" in next(i for c, i in LOG if c[0] == "tee" and i and "chpasswd" in i))

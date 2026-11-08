@@ -58,7 +58,8 @@ class QemuMixin:
         import core
         node = self.db.execute("SELECT listen FROM nodes WHERE id=?", (s["node_id"],)).fetchone()
         la = (node["listen"] if node else "") or "0.0.0.0"
-        return la if core.LISTEN_RE.match(la) else "0.0.0.0"
+        if not core.LISTEN_RE.match(la) or ":" in la or la in ("0.0.0.0", "::", "[::]"): return ""      # QEMU hostfwd takes IPv4 only; empty = all IPv4 addresses
+        return la
 
     def q_start(self, s):
         d = self.qdir(s)
