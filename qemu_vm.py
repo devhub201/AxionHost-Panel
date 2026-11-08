@@ -65,7 +65,7 @@ class QemuMixin:
         if self.q_running(s): return
         accel, cpu = self.q_accel()
         self.qx("rm", "-f", d + "/qmp.sock", d + "/pid", check=False, timeout=15)
-        self.qx("qemu-system-x86_64", "-name", s["container"], "-machine", "q35,accel=" + accel.split(",")[0], "-accel", accel, "-cpu", cpu,
+        self.qx("qemu-system-x86_64", "-name", s["container"], "-machine", "q35", "-accel", accel, "-cpu", cpu,
                 "-smp", int(s["cpu"]), "-m", "%dM" % (int(s["ram"]) * 1024),
                 "-drive", "file=%s/disk.qcow2,if=virtio,format=qcow2" % d, "-drive", "file=%s/seed.iso,if=virtio,media=cdrom,readonly=on" % d,
                 "-netdev", "user,id=n0," + self.q_hostfwds(s), "-device", "virtio-net-pci,netdev=n0", "-device", "virtio-rng-pci",
