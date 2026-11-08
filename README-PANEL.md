@@ -113,3 +113,9 @@ Disk usage per VPS (Docker) is the container's own writable layer, the host disk
 - **Giveaways** (`/giveaway start`), bot server buttons, `/admin createvps` (creates account + DMs login/password if user not registered)
 - Settings in Admin → Settings: referral_*, snapshots_per_server, ports_per_server, port_range, abuse_*, node_*_alert
 Limits: port forwarding needs `iptables` on the node; abuse detection is CPU-only.
+
+## One-command install with the QEMU / KVM-X engine
+```bash
+git clone https://github.com/devhub201/AxionHost-Panel /opt/axionhost-panel && cd /opt/axionhost-panel && bash install-all.sh [CLOUDFLARE_TUNNEL_TOKEN]
+```
+Installs QEMU, sets `backend = qemu` and starts web + worker + bot (with or without systemd). Uses hardware KVM when `/dev/kvm` exists, otherwise software emulation (TCG, ~6-15x slower - OK for free/test VPS). Each VPS is a real VM (own kernel) with SSH forwarded from the node's port range. Snapshots are not supported on the qemu engine yet.

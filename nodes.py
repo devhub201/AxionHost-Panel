@@ -119,6 +119,7 @@ echo "MEM $(awk '/MemTotal/{print $2*1024}' /proc/meminfo 2>/dev/null)"
 echo "DISK $(df -B1 --output=size,avail / 2>/dev/null | tail -1)"
 echo "LOAD $(cut -d' ' -f1 /proc/loadavg 2>/dev/null)"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then echo "DOCKER ok"; else echo "DOCKER missing"; fi
+if command -v qemu-system-x86_64 >/dev/null 2>&1 && command -v qemu-img >/dev/null 2>&1; then echo "QEMU ok"; else echo "QEMU missing"; fi
 if command -v lxc >/dev/null 2>&1 && lxc info >/dev/null 2>&1; then echo "LXD ok"; else echo "LXD missing"; fi
 """
 
@@ -133,4 +134,4 @@ def parse_health(out):
         except (TypeError, ValueError): return None
     disk = (d.get("DISK") or "").split()
     return dict(cpu_total=num(d.get("NPROC")), ram_total=num(d.get("MEM")), disk_total=num(disk[0]) if len(disk) == 2 else None,
-                disk_free=num(disk[1]) if len(disk) == 2 else None, load1=num(d.get("LOAD"), float), docker=d.get("DOCKER") == "ok", lxd=d.get("LXD") == "ok")
+                disk_free=num(disk[1]) if len(disk) == 2 else None, load1=num(d.get("LOAD"), float), docker=d.get("DOCKER") == "ok", lxd=d.get("LXD") == "ok", qemu=d.get("QEMU") == "ok")

@@ -481,7 +481,11 @@ def create_app(cfg=None, http=None):
         if app.term_argv: res = app.term_argv(r); return res if isinstance(res, tuple) else (res, None)
         if not core.CONT_RE.match(r["container"]): raise ops.OpError("Bad container name")
         n = db.execute("SELECT * FROM nodes WHERE id=?", (r["node_id"],)).fetchone()
-        if str(cfg.get("backend", "lxd")).lower() == "docker": inner = ["docker", "exec", "-it", "-e", "TERM=xterm-256color", r["container"], "sh", "-c", term.SHELL_CMD]
+        if str(cfg.get("backend", "lxd")).lower() == "qemu":
+            if not r["ssh_port"]: raise ops.OpError("VM has no SSH port")
+            import worker as _w
+            inner = ["sshpass", "-p", core.dec(cfg["secret_key"], r["root_pw_enc"]), "ssh", "-tt", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-p", str(int(r["ssh_port"])), "root@127.0.0.1"]
+        elif str(cfg.get("backend", "lxd")).lower() == "docker": inner = ["docker", "exec", "-it", "-e", "TERM=xterm-256color", r["container"], "sh", "-c", term.SHELL_CMD]
         else:
             rem = (n["lxc_remote"] if n else "") or ""
             if not core.REMOTE_RE.match(rem): raise ops.OpError("Bad node remote")

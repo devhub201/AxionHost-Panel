@@ -171,12 +171,16 @@ def real_run(args, input=None, timeout=300):
     except subprocess.TimeoutExpired: return 124, "timeout"
     except FileNotFoundError: return 127, "%s not found (is it installed?)" % args[0]
 
-class Worker:
+import qemu_vm
+class Worker(qemu_vm.QemuMixin):
+    JobErr = JobError
+    def dec_pw(self, s): return dec(self.cfg["secret_key"], s["root_pw_enc"])
     def __init__(self, cfg, db=None, run=real_run, sleep=time.sleep):
         self.cfg, self.run, self.sleep = cfg, run, sleep
         self.db = db or core.connect(cfg["db_path"]); core.init_db(self.db)
         self.last = dict(sync=0, bill=0, scan=0, disk=0, tools=0, nodes=0, stats=0, ports=0)
         self.docker_mode = str(cfg.get("backend", "lxd")).lower() == "docker"
+        self.qemu_mode = str(cfg.get("backend", "lxd")).lower() == "qemu"
         self.cur_node, self._ssh = None, {}
         self.datadir = os.path.dirname(os.path.abspath(cfg["db_path"]))
 
@@ -311,6 +315,7 @@ class Worker:
         return n
 
     def provision(self, s, image):
+        if self.qemu_mode: return self.provision_qemu(s, image)
         if self.docker_mode: return self.provision_docker(s, image)
         t = self.target(s)
         if not IMG_RE.match(image): raise JobError("bad image")
@@ -372,6 +377,10 @@ class Worker:
 
     def simple(self, s, verb, status):
         if verb in ("stop", "restart"): self.tools_reset(s["id"])
+        if self.qemu_mode:
+            if verb in ("stop", "restart"): self.q_stop(s)
+            if verb in ("start", "restart"): self.q_start(s)
+            self.db.execute("UPDATE servers SET status=? WHERE id=?", (status, s["id"])); return verb
         if self.docker_mode:
             self.dk(verb, *(["-t", "10"] if verb in ("stop", "restart") else []), self.cname(s), timeout=120)
             self.db.execute("UPDATE servers SET status=? WHERE id=?", (status, s["id"])); return verb
@@ -449,7 +458,11 @@ class Worker:
         self.on(node_id)
         rows = self.db.execute("SELECT f.*,s.container,s.id sid,s.status sstatus,s.deleted sdel,s.node_id FROM port_forwards f JOIN servers s ON s.id=f.server_id WHERE s.node_id=?", (node_id,)).fetchall()
         active = [r for r in rows if r["status"] == "active" and not r["sdel"] and r["sstatus"] == "running" and CONT_RE.match(r["container"])]
-        if self.docker_mode:
+        if self.qemu_mode:
+            for sid in {r["sid"] for r in rows}:
+                srv = self.db.execute("SELECT * FROM servers WHERE id=?", (sid,)).fetchone()
+                if srv["status"] == "running" and not srv["deleted"]: self.q_hostfwd_sync(srv, [r for r in rows if r["sid"] == sid and (r["status"] == "active" or r["status"] == "deleting")])
+        elif self.docker_mode:
             ips = {}; lines = []
             for r in active:
                 if r["container"] not in ips:
@@ -485,7 +498,8 @@ class Worker:
 
     def job_delete(self, s, p):
         self.tools_reset(s["id"])
-        if self.docker_mode: self.dk("rm", "-f", "-v", self.cname(s), check=False, timeout=180)
+        if self.qemu_mode: self.q_delete(s)
+        elif self.docker_mode: self.dk("rm", "-f", "-v", self.cname(s), check=False, timeout=180)
         else: self.lxc("delete", self.target(s), "--force", check=False, timeout=180)
         for sn in self.db.execute("SELECT * FROM snapshots WHERE server_id=?", (s["id"],)).fetchall():
             try:
@@ -511,6 +525,7 @@ class Worker:
         except Exception: log.warning("banner install failed for %s", s["id"], exc_info=True)
 
     def vexec(self, s, script, timeout=120):
+        if self.qemu_mode: return 0, ""
         """Run a fixed /bin/sh script inside the VPS (docker exec or lxc exec). The script never contains user input."""
         if self.docker_mode: return self.dk("exec", "-i", self.cname(s), "sh", "-s", input=script, timeout=timeout, check=False)
         return self.lxc("exec", self.target(s), "--", "sh", "-s", input=script, timeout=timeout, check=False)
@@ -556,7 +571,7 @@ class Worker:
             except JobError as e: rc, out = 255, str(e)
             if rc != 0:
                 self.db.execute("UPDATE nodes SET health='offline',health_note=? WHERE id=?", ((out or "unreachable")[-200:], n["id"])); self.record_up(n["id"], False); self.node_alert(n, {"offline": (out or "unreachable")[-120:]}); continue
-            h = nodes.parse_health(out); ok = h["docker"] if self.docker_mode else h["lxd"]
+            h = nodes.parse_health(out); ok = h["qemu"] if self.qemu_mode else (h["docker"] if self.docker_mode else h["lxd"])
             s = core.get_settings(self.db); prob = {}
             if not ok: prob["offline"] = "engine not running"
             if h["disk_total"] and h["disk_free"] is not None and h["disk_free"] * 100 < h["disk_total"] * (geti(s, "node_disk_alert_pct") or 10): prob["disk"] = "only %.1f GB free of %.0f GB" % (h["disk_free"] / core.GB, h["disk_total"] / core.GB)
@@ -565,7 +580,7 @@ class Worker:
             except (TypeError, ValueError): pass
             self.record_up(n["id"], ok); self.node_alert(n, prob)
             self.db.execute("UPDATE nodes SET health=?,health_note=?,cpu_total=?,ram_total=?,disk_total=?,disk_free=?,load1=?,seen_at=? WHERE id=?",
-                            ("online" if ok else "offline", "" if ok else ("Docker is not installed or not running" if self.docker_mode else "LXD is not installed or not running"),
+                            ("online" if ok else "offline", "" if ok else ("qemu-system-x86_64 / qemu-img not installed" if self.qemu_mode else "Docker is not installed or not running" if self.docker_mode else "LXD is not installed or not running"),
                              h["cpu_total"], h["ram_total"], h["disk_total"], h["disk_free"], h["load1"], now(), n["id"]))
 
     def record_up(self, node_id, up):
@@ -587,7 +602,10 @@ class Worker:
             rows = [r for r in self.db.execute("SELECT id,container,cpu,status FROM servers WHERE node_id=? AND deleted=0 AND status IN ('running','stopped')", (n["id"],)).fetchall() if CONT_RE.match(r["container"])]
             if not rows: continue
             vals = {}
-            if self.docker_mode:
+            if self.qemu_mode:
+                for r in rows:
+                    if r["status"] == "running": vals[r["container"]] = self.q_stats({"container": r["container"]}) if False else self._qs(r)
+            elif self.docker_mode:
                 rc, out = self.dk("stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}|{{.MemUsage}}", *[r["container"] for r in rows if r["status"] == "running"], check=False, timeout=90) if any(r["status"] == "running" for r in rows) else (1, "")
                 for l in out.splitlines() if rc == 0 else []:
                     p = l.split("|")
@@ -606,6 +624,9 @@ class Worker:
                     self.db.execute("INSERT OR REPLACE INTO stat_hist(server_id,t,cpu,mem) VALUES(?,?,?,?)", (r["id"], now() // 60 * 60, cpu, v[1]))
                     self.abuse_check(r["id"], cpu)
         self.db.execute("DELETE FROM stat_hist WHERE t<?", (now() - 86400,))
+
+    def _qs(self, r):
+        s = self.db.execute("SELECT * FROM servers WHERE id=?", (r["id"],)).fetchone(); return self.q_stats(s)
 
     def abuse_check(self, sid, cpu):
         """Sustained near-100% CPU for N minutes -> alert staff (and optionally suspend). Streak resets as soon as load drops."""
@@ -628,10 +649,11 @@ class Worker:
     def job_resetpw(self, s, p):
         if s["status"] != "running": raise JobError("start the server first")
         pw = core.gen_password()
-        if self.docker_mode: self.dk("exec", "-i", self.cname(s), "chpasswd", input="root:%s\n" % pw)
+        if self.qemu_mode: self.q_resetpw(s, pw)
+        elif self.docker_mode: self.dk("exec", "-i", self.cname(s), "chpasswd", input="root:%s\n" % pw)
         else: self.lxc("exec", self.target(s), "--", "chpasswd", input="root:%s\n" % pw)
         self.db.execute("UPDATE servers SET root_pw_enc=? WHERE id=?", (enc(self.cfg["secret_key"], pw), s["id"]))
-        self.install_banner(s)
+        if not self.qemu_mode: self.install_banner(s)
         ops.notify(self.db, s["user_id"], "Root password changed", "The root password of **%s** was changed. See it in the panel → Server → Show root password." % s["name"], "resetpw")
         return "password changed"
 
@@ -642,6 +664,12 @@ class Worker:
             self.on(n["id"]); yield n
 
     def sync_status(self):
+        if self.qemu_mode:
+            for n in self.live_nodes():
+                for s in self.db.execute("SELECT * FROM servers WHERE node_id=? AND deleted=0 AND status IN ('running','stopped')", (n["id"],)).fetchall():
+                    st = "running" if self.q_running(s) else "stopped"
+                    if st != s["status"]: self.db.execute("UPDATE servers SET status=? WHERE id=?", (st, s["id"]))
+            return
         if self.docker_mode:
             for n in self.live_nodes():
                 rc, out = self.dk("ps", "-a", "--format", "{{.Names}}|{{.State}}", check=False, timeout=60)

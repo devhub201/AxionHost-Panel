@@ -126,6 +126,11 @@ install_engine() {   # $1 = docker | lxd
     if docker run --rm --init --storage-opt size=2000000000 alpine:3.20 true >/dev/null 2>&1; then ok "Per-VPS disk limit: enforced"
     elif docker run --rm --init alpine:3.20 true >/dev/null 2>&1; then warn "Per-VPS disk limit NOT enforceable on this storage driver — VPS still work, disk usage is shown per VPS, but not capped"
     else warn "Could not pull alpine test image (internet / registry?) — check: docker run --rm alpine:3.20 true"; fi;;
+  qemu)
+    step "Installing QEMU" apt-get install -y -qq qemu-system-x86 qemu-utils genisoimage sshpass curl || return 1
+    command -v qemu-system-x86_64 >/dev/null || return 1
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ok "Hardware KVM available - fast VMs"; else warn "No /dev/kvm - VMs run in software emulation (TCG), roughly 6-15x slower. Fine for free/test VPS."; fi
+    ok "QEMU ready ($(qemu-system-x86_64 --version | head -1))";;
   lxd)
     command -v lxc >/dev/null 2>&1 || { step "Installing LXD" snap install lxd || return 1; }
     lxc storage list --format csv 2>/dev/null | grep -q . || step "Initialising LXD" lxd init --auto --storage-backend=dir || return 1
@@ -246,8 +251,8 @@ cmd_update() { need_root; mkdir -p "$(dirname "$LOG")"; banner
   [ -d .git ] && step "Pulling latest code" git pull --ff-only || warn "Not a git checkout — upload new files manually"
   step "Updating packages" "$VENV/bin/pip" install -q -r requirements-panel.txt
   step "Restarting services" systemctl restart $SERVICES; }
-cmd_engine() { need_root; mkdir -p "$(dirname "$LOG")"; local e="${1:-}"; case "$e" in docker|lxd) ;; *) echo "Usage: $0 engine docker|lxd"; exit 1;; esac
-  banner; install_engine "$e" || exit 1; set_backend "$e"; step "Restarting worker" systemctl restart ${SVC}-worker
+cmd_engine() { need_root; mkdir -p "$(dirname "$LOG")"; local e="${1:-}"; case "$e" in docker|lxd|qemu) ;; *) echo "Usage: $0 engine docker|lxd|qemu"; exit 1;; esac
+  banner; install_engine "$e" || exit 1; set_backend "$e"; step "Restarting worker" bash -c "systemctl restart ${SVC}-worker 2>/dev/null || pkill -f 'python.* worker.py' || true"
   ok "VPS engine is now: $e   (existing VPS created with the other engine are not moved)"; }
 cmd_status() { for s in $SERVICES cloudflared caddy; do systemctl list-unit-files 2>/dev/null | grep -q "^$s.service" || continue; if systemctl is-active --quiet "$s"; then ok "$s"; else bad "$s (inactive)"; fi; done; }
 cmd_doctor() { banner; head_ "Doctor"; detect_net; [ -f "$CFG" ] && ok "config.panel.json present" || bad "config.panel.json missing"
