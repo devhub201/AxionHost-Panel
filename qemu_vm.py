@@ -105,6 +105,7 @@ class QemuMixin:
             self.q_start(s)
             if not self.q_wait_ssh(s): raise self.JobErr("VM did not open SSH in time (TCG boots are slow - raise qemu_boot_timeout). Log: %s/console.log" % d)
         except Exception:
+            self.qx("sh", "-c", 'mkdir -p /var/log/axionhost; cp "$1/console.log" /var/log/axionhost/last-vm-console.log 2>/dev/null; true', "_", d, check=False, timeout=15)
             self.q_stop(s, 6); self.qx("rm", "-rf", d, check=False, timeout=60); raise
 
     def q_delete(self, s):
