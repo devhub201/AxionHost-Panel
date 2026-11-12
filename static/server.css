@@ -1,5 +1,5 @@
 /* manage-server page */
-.hero{position:relative;overflow:hidden;border:1px solid var(--line2);border-radius:20px;padding:22px 24px;margin-bottom:16px;background:radial-gradient(900px 260px at 0% 0%,rgba(90,140,255,.16),transparent 60%),radial-gradient(700px 240px at 100% 100%,rgba(160,100,255,.14),transparent 60%),var(--s1)}
+.hero{position:relative;overflow:hidden;border:1px solid var(--line2);border-radius:20px;padding:22px 24px;margin-bottom:16px;background:radial-gradient(900px 260px at 0% 0%,rgba(51,214,255,.18),transparent 60%),radial-gradient(700px 240px at 100% 100%,rgba(165,102,255,.17),transparent 60%),var(--s1)}
 .hero:before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(0deg,rgba(255,255,255,.025) 0 1px,transparent 1px 4px);pointer-events:none}
 .hero>*{position:relative}
 .hero h1{font-size:clamp(24px,4vw,34px);letter-spacing:-.02em;margin:2px 0}
@@ -7,7 +7,10 @@
 .hero .meta b{color:#e6e6ea;font-weight:600}
 .hero .top2{display:flex;justify-content:space-between;gap:14px;align-items:flex-start;flex-wrap:wrap}
 .hero .acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
-.hero .acts .btn{padding:10px 16px}
+.hero .acts .btn{padding:11px 18px;font-weight:600}
+.hero .acts [data-a="start"]{border-color:rgba(74,222,128,.45);color:#86efac;background:rgba(74,222,128,.08)}.hero .acts [data-a="start"]:hover:not(:disabled){background:rgba(74,222,128,.16)}
+.hero .acts [data-a="stop"]{border-color:rgba(248,113,113,.4);color:var(--bad)}.hero .acts [data-a="stop"]:hover:not(:disabled){background:rgba(248,113,113,.1)}
+.hero .acts [data-a="restart"]{border-color:rgba(251,191,36,.4);color:var(--warn)}.hero .acts [data-a="restart"]:hover:not(:disabled){background:rgba(251,191,36,.1)}
 .sp-tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
 .tile{border:1px solid var(--line);background:var(--s1);border-radius:16px;padding:16px 18px;position:relative;overflow:hidden}
 .tile:after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:linear-gradient(90deg,#33d6ff,#6b7bff,#a566ff);opacity:.7}
